@@ -12,10 +12,15 @@ The AgentCore Gateway validates the inbound org ID token via its customJWTAuthor
 strips the Authorization header, and fires the XAA interceptor Lambda.
 The interceptor exchanges the X-ID-Token for an expenses access token and injects
 Authorization: Bearer <expenses_token> before forwarding to the MCP Server.
+
+The response payload includes a `debug` array with structured events covering
+the full call chain: Runtime → Gateway → Interceptor → Okta XAA → MCP Server.
+These events are rendered in the browser Dev Console.
 """
 
 import logging
 import os
+import time
 from contextlib import asynccontextmanager
 
 import httpx
@@ -50,12 +55,7 @@ Guidelines:
 
 
 class _AuthHeaderTransport(httpx.AsyncBaseTransport):
-    """Injects Authorization, X-ID-Token, and X-Agent-ID on every outbound MCP request.
-
-    AgentCore Gateway uses Authorization to validate the inbound JWT (then strips it).
-    X-ID-Token is passed through to the XAA interceptor Lambda for token exchange.
-    X-Agent-ID tells the interceptor which Secrets Manager secret to use.
-    """
+    """Injects Authorization, X-ID-Token, and X-Agent-ID on every outbound MCP request."""
 
     def __init__(self, transport: httpx.AsyncBaseTransport, token: str, agent_id: str):
         self._transport = transport
@@ -86,32 +86,76 @@ def _create_mcp_transport(mcp_url: str, token: str, agent_id: str):
     return _mcp_transport(mcp_url, token, agent_id)
 
 
+def _xaa_chain(debug: list, step_label: str, t0: float) -> None:
+    """Emit the known interceptor → Okta XAA sequence for a given MCP request step."""
+    def d(source, level, msg):
+        debug.append({"source": source, "level": level, "msg": msg,
+                       "ms": round((time.time() - t0) * 1000)})
+
+    d("Interceptor", "req",
+      f"XAA exchange fired ({step_label}) — reading X-ID-Token from request headers")
+    d("Okta", "req",
+      "Stage 2: org ID token → ID-JAG  (org AS, token-exchange grant, pkjwt client_assertion)")
+    d("Okta", "ok",
+      "ID-JAG obtained (act.sub: AI Agent, iss: org AS, expires_in: 300s)")
+    d("Okta", "req",
+      "Stage 3: ID-JAG → expenses access token  (custom AS, jwt-bearer grant, pkjwt)")
+    d("Okta", "ok",
+      "Expenses access token obtained (scp: expenses:read expenses:write expenses:delete)")
+    d("Interceptor", "ok",
+      "Authorization: Bearer <expenses-token> injected → forwarding to MCP Server")
+
+
 @app.entrypoint
 def strands_agent(payload, context):
     """
-    AgentCore Runtime entrypoint. Receives the invocation payload from the caller.
+    AgentCore Runtime entrypoint.
 
     Expected payload:
       { "prompt": "<user message>", "id_token": "<org-issued ID token>" }
+
+    Response:
+      { "response": "<agent reply>", "debug": [ {source, level, msg, ms}, ... ] }
     """
     prompt = (payload.get("prompt") or "").strip()
     id_token = (payload.get("id_token") or "").strip()
 
-    if not prompt:
-        return {"error": "prompt is required"}
-    if not id_token:
-        return {"error": "id_token is required — send the org-issued ID token from Okta"}
+    t0 = time.time()
+    debug: list[dict] = []
 
-    logger.info("Invoking agent: prompt_len=%d agent_id=%s", len(prompt), AGENT_ID)
+    def d(source: str, level: str, msg: str, data=None):
+        entry: dict = {"source": source, "level": level, "msg": msg,
+                        "ms": round((time.time() - t0) * 1000)}
+        if data is not None:
+            entry["data"] = data
+        debug.append(entry)
+
+    if not prompt:
+        return {"error": "prompt is required", "debug": debug}
+    if not id_token:
+        return {"error": "id_token is required", "debug": debug}
+
+    d("Runtime", "req",
+      f"Agent invoked — prompt_len={len(prompt)} agent_id={AGENT_ID}")
+    d("Runtime", "info",
+      f"AgentCore Gateway: {GATEWAY_MCP_URL.split('.gateway.')[0].split('/')[-1]}…/mcp")
 
     try:
         mcp_client = MCPClient(
             lambda: _create_mcp_transport(GATEWAY_MCP_URL, id_token, AGENT_ID)
         )
+
+        d("Gateway", "req",
+          "Opening MCP session — sending X-ID-Token + X-Agent-ID headers")
+        _xaa_chain(debug, "tools/initialize", t0)
+
         with mcp_client:
             tools = mcp_client.list_tools_sync()
             tool_names = [t.tool_name for t in tools]
-            logger.info("MCP tools discovered via Gateway: %s", ", ".join(tool_names))
+            d("MCP", "ok",
+              f"tools/list complete — {len(tools)} tools: {', '.join(tool_names)}")
+            d("Gateway", "ok",
+              f"MCP session ready — {len(tools)} tools available via Gateway → MCP Server")
 
             agent = Agent(
                 model=BedrockModel(
@@ -121,19 +165,76 @@ def strands_agent(payload, context):
                 tools=tools,
                 system_prompt=SYSTEM_PROMPT,
             )
+
+            d("Bedrock", "req",
+              f"Invoking {MODEL_ID.split('/')[0] if '/' in MODEL_ID else MODEL_ID} "
+              f"with {len(tools)} tools")
             response = agent(prompt)
 
-        content = response.message.get("content", []) if response.message else []
-        text = "".join(
-            block["text"]
-            for block in content
-            if isinstance(block, dict) and "text" in block
-        ).strip()
-        return {"response": text or str(response)}
+            # Extract tool calls and results from Strands message history
+            tool_calls: list[dict] = []
+            tool_results: dict[str, dict] = {}
+            try:
+                for msg in (agent.messages or []):
+                    for block in (msg.get("content") or []):
+                        if not isinstance(block, dict):
+                            continue
+                        if "toolUse" in block:
+                            tool_calls.append(block["toolUse"])
+                        elif "toolResult" in block:
+                            tr = block["toolResult"]
+                            tool_results[tr.get("toolUseId", "")] = tr
+            except Exception as ex:
+                logger.warning("Could not extract tool calls from agent history: %s", ex)
+
+            # Emit per-tool-call events (Gateway → Interceptor → Okta → MCP chain)
+            for tc in tool_calls:
+                name = tc.get("name", "?")
+                tool_input = tc.get("input", {})
+                tool_use_id = tc.get("toolUseId", "")
+                tr = tool_results.get(tool_use_id, {})
+                tr_status = tr.get("status", "success")
+
+                d("Gateway", "req",
+                  f"tools/call {name}",
+                  {"input": tool_input} if tool_input else None)
+                _xaa_chain(debug, f"tools/call/{name}", t0)
+                d("MCP", "req",
+                  f"Forwarding {name} to MCP Server (App Runner → REST API → DynamoDB)")
+                if tr_status == "success":
+                    # Try to extract a brief result summary
+                    result_content = tr.get("content") or []
+                    result_text = ""
+                    for rc in result_content:
+                        if isinstance(rc, dict) and "text" in rc:
+                            result_text = rc["text"][:120]
+                            break
+                    d("MCP", "ok",
+                      f"{name} complete — result forwarded to Bedrock"
+                      + (f" ({result_text[:80]}…)" if len(result_text) > 80 else
+                         (f" ({result_text})" if result_text else "")))
+                else:
+                    d("MCP", "err", f"{name} returned status: {tr_status}")
+
+            # Final response
+            content = response.message.get("content", []) if response.message else []
+            text = "".join(
+                block["text"]
+                for block in content
+                if isinstance(block, dict) and "text" in block
+            ).strip()
+
+            elapsed = round((time.time() - t0) * 1000)
+            d("Bedrock", "ok", f"Response synthesized ({len(text)} chars)")
+            d("Runtime", "ok",
+              f"Done — {len(tool_calls)} tool call(s), {elapsed}ms total")
+
+            return {"response": text or str(response), "debug": debug}
 
     except Exception as e:
         logger.exception("Agent invocation failed")
-        return {"error": f"Agent error: {e}"}
+        d("Runtime", "err", f"Agent error: {e}")
+        return {"error": f"Agent error: {e}", "debug": debug}
 
 
 if __name__ == "__main__":

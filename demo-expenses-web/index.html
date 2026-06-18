@@ -19,9 +19,13 @@
     .ce-time { color:#475569; flex-shrink:0; }
     .ce-src  { flex-shrink:0; font-weight:700; width:72px; }
     .ce-msg  { color:#e2e8f0; white-space:pre-wrap; word-break:break-all; }
-    .src-browser { color:#60a5fa; }
-    .src-lambda  { color:#fb923c; }
-    .src-xaa     { color:#a78bfa; }
+    .src-browser     { color:#60a5fa; }
+    .src-runtime     { color:#fb923c; }
+    .src-bedrock     { color:#c084fc; }
+    .src-gateway     { color:#2dd4bf; }
+    .src-interceptor { color:#fbbf24; }
+    .src-okta        { color:#a78bfa; }
+    .src-mcp         { color:#4ade80; }
     .lvl-ok  .ce-msg { color:#4ade80; }
     .lvl-err .ce-msg { color:#f87171; }
     .lvl-tok .ce-msg { color:#fbbf24; }
@@ -379,7 +383,7 @@
               <span class="px-2.5 py-1 rounded-full text-xs font-bold bg-purple-500/20 text-purple-300 border border-purple-500/30">AWS Bedrock Strands</span>
             </div>
             <h1 class="text-3xl font-bold text-white mb-2">Architecture &amp; Security</h1>
-            <p class="text-slate-400 text-base max-w-2xl">How ExpensePro uses <strong class="text-indigo-300">Okta Cross-App Access (XAA)</strong> to let the AI agent act on behalf of authenticated users — without ever sharing credentials or storing tokens.</p>
+            <p class="text-slate-400 text-base max-w-2xl">How ExpensePro uses <strong class="text-indigo-300">Okta Cross-App Access (XAA)</strong> — orchestrated by an <strong class="text-teal-300">AgentCore Gateway Interceptor Lambda</strong> — to let the AI agent act on behalf of users without ever holding credentials or storing tokens.</p>
           </div>
         </div>
 
@@ -546,9 +550,9 @@
             const steps = [
               { n:1, icon:'🔐', title:'User Login', sub:'Custom AS · PKCE', detail:'SPA authenticates via Authorization Code + PKCE against the Okta Custom AS. Returns an <code>access_token</code> with <code>expenses:*</code> scopes for direct API calls.', color:'blue' },
               { n:2, icon:'🪪', title:'Org ID Token', sub:'Org AS · Web App', detail:'Browser silently gets a second ID token from the Okta Org AS (Web App client, client_secret_post). This token is required by the XAA Resource Connection.', color:'violet' },
-              { n:3, icon:'💬', title:'AI Chat Request', sub:'Browser → Lambda', detail:'User sends a message to the AI assistant. The browser forwards the Org ID token to the Lambda (never the expenses access token).', color:'indigo' },
-              { n:4, icon:'🔄', title:'XAA Exchange', sub:'Org AS + Custom AS', detail:'Lambda performs two token exchanges:<br>① Org ID token → <strong>ID-JAG</strong> (org AS, pkjwt)<br>② ID-JAG → <strong>expenses access token</strong> (custom AS, pkjwt)', color:'purple' },
-              { n:5, icon:'✅', title:'Agent Acts via MCP', sub:'Bedrock · MCP · API', detail:'Strands agent connects to the <strong>MCP Server</strong> via streamable-HTTP using the delegated token. Tools (<code>list_expenses</code>, <code>create_expense</code>, <code>delete_expense</code>) are auto-discovered. MCP Server forwards calls to the Expenses API.', color:'green' },
+              { n:3, icon:'💬', title:'AI Chat Request', sub:'Browser → AgentCore Runtime', detail:'User sends a message. Browser POSTs <code>{prompt, id_token}</code> to AgentCore Runtime with <code>Authorization: Bearer &lt;org-id-token&gt;</code>. Runtime validates the JWT via its Okta OIDC authorizer.', color:'indigo' },
+              { n:4, icon:'🔄', title:'XAA via Interceptor', sub:'Gateway → Lambda → Okta', detail:'For <strong>every MCP call</strong>, the Gateway fires the XAA Interceptor Lambda:<br>① Reads <code>X-ID-Token</code> header<br>② org ID token → <strong>ID-JAG</strong> (org AS, pkjwt)<br>③ ID-JAG → <strong>expenses access token</strong> (custom AS, pkjwt)<br>④ Injects <code>Authorization: Bearer</code> into forwarded request', color:'purple' },
+              { n:5, icon:'✅', title:'Agent Acts via MCP', sub:'Bedrock · Gateway · MCP', detail:'Strands agent connects to MCP tools through <strong>AgentCore Gateway</strong>. Tools (<code>list_expenses</code>, <code>create_expense</code>, <code>delete_expense</code>) are auto-discovered. XAA fires per tool call. MCP Server forwards to the Expenses API.', color:'green' },
             ];
             const cols = document.getElementById('arch-steps').closest('.grid');
             cols.innerHTML = '';
@@ -571,63 +575,76 @@
 
         <!-- Sequence Diagram -->
         <div class="bg-white rounded-xl border border-slate-200 p-6 mb-6">
-          <h2 class="text-base font-bold text-slate-900 mb-1">ID-JAG Token Exchange Sequence</h2>
-          <p class="text-xs text-slate-400 mb-4">The bridge between the user's identity and the AI agent's access rights — two exchanges, one delegated token</p>
-          <!-- Actor header row -->
-          <div class="grid grid-cols-5 gap-2 mb-1 text-center">
-            <div class="text-[10px] font-bold text-slate-600 py-2 px-2 bg-blue-50 rounded-lg border border-blue-100">🌐 Browser</div>
-            <div class="text-[10px] font-bold text-slate-600 py-2 px-2 bg-indigo-50 rounded-lg border border-indigo-100">⚡ Lambda</div>
-            <div class="text-[10px] font-bold text-slate-600 py-2 px-2 bg-violet-50 rounded-lg border border-violet-100">🏛 Org AS<br><span class="font-normal text-slate-400">zelemon.oktapreview.com</span></div>
-            <div class="text-[10px] font-bold text-slate-600 py-2 px-2 bg-purple-50 rounded-lg border border-purple-100">🔑 Custom AS<br><span class="font-normal text-slate-400">ausdo82jknZLNiOmA0x7</span></div>
-            <div class="text-[10px] font-bold text-slate-600 py-2 px-2 bg-teal-50 rounded-lg border border-teal-100">🔧 MCP Server<br><span class="font-normal text-slate-400">+ Expenses API</span></div>
+          <h2 class="text-base font-bold text-slate-900 mb-1">AgentCore End-to-End Sequence</h2>
+          <p class="text-xs text-slate-400 mb-4">Full call chain — Browser → Runtime → Gateway → Interceptor → Okta XAA → MCP Server. XAA fires on every MCP call (tools/initialize + each tools/call).</p>
+          <!-- Actor header row — 6 columns -->
+          <div class="grid grid-cols-6 gap-1 mb-1 text-center">
+            <div class="text-[9px] font-bold text-slate-600 py-1.5 px-1 bg-blue-50 rounded-lg border border-blue-100">🌐<br>Browser</div>
+            <div class="text-[9px] font-bold text-slate-600 py-1.5 px-1 bg-orange-50 rounded-lg border border-orange-100">☁️<br>AgentCore<br><span class="font-normal text-slate-400">Runtime</span></div>
+            <div class="text-[9px] font-bold text-slate-600 py-1.5 px-1 bg-teal-50 rounded-lg border border-teal-100">🛡️<br>AgentCore<br><span class="font-normal text-slate-400">Gateway</span></div>
+            <div class="text-[9px] font-bold text-slate-600 py-1.5 px-1 bg-amber-50 rounded-lg border border-amber-100">⚡<br>XAA<br><span class="font-normal text-slate-400">Interceptor</span></div>
+            <div class="text-[9px] font-bold text-slate-600 py-1.5 px-1 bg-violet-50 rounded-lg border border-violet-100">🔑<br>Okta<br><span class="font-normal text-slate-400">org + custom AS</span></div>
+            <div class="text-[9px] font-bold text-slate-600 py-1.5 px-1 bg-green-50 rounded-lg border border-green-100">🔧<br>MCP Server<br><span class="font-normal text-slate-400">+ Expenses API</span></div>
           </div>
           <div id="seq-diagram"></div>
           <script>
           (function(){
+            // Actors: 0=Browser  1=Runtime  2=Gateway  3=Interceptor  4=Okta  5=MCP+API
             const msgs = [
-              { from:0, to:2, label:'PKCE authorize (Web App cid)', sub:'code_challenge · scope=openid profile', color:'violet', note:'Get org-issued ID token' },
-              { from:2, to:0, label:'← auth_code', sub:'', color:'violet' },
-              { from:0, to:1, label:'POST /org-token {code, code_verifier}', sub:'', color:'indigo', note:'Code exchange via Lambda' },
-              { from:1, to:2, label:'POST /oauth2/v1/token (client_secret_post)', sub:'grant=authorization_code · code_verifier', color:'violet' },
-              { from:2, to:1, label:'← org_id_token (cid=Web App)', sub:'iss: zelemon.oktapreview.com', color:'violet' },
-              { from:0, to:1, label:'POST /chat {message, orgIdToken}', sub:'', color:'indigo', note:'XAA Exchange begins' },
-              { from:1, to:2, label:'Stage 2 — token-exchange (pkjwt)', sub:'grant=token-exchange · requested=id-jag · client_assertion=AI Agent', color:'purple' },
-              { from:2, to:1, label:'← ID-JAG (act.sub = AI Agent)', sub:'expires_in: 300s', color:'purple' },
-              { from:1, to:3, label:'Stage 3 — jwt-bearer (pkjwt)', sub:'assertion=ID-JAG · client_assertion=AI Agent', color:'purple' },
-              { from:3, to:1, label:'← expenses access_token', sub:'scp: expenses:read write delete', color:'green' },
-              { from:1, to:4, label:'MCP connect + list_tools_sync()', sub:'streamablehttp_client · Authorization: Bearer <token>', color:'green' },
-              { from:4, to:1, label:'← tools: list_expenses, create_expense, delete_expense', sub:'auto-discovered via MCP protocol', color:'green' },
-              { from:1, to:4, label:'MCP tool call (e.g. list_expenses)', sub:'Strands invokes tool via MCP JSON-RPC', color:'green' },
-              { from:4, to:3, label:'GET / POST / DELETE /expenses', sub:'MCP Server forwards with Bearer token', color:'green' },
-              { from:3, to:4, label:'← expense data (JSON)', sub:'', color:'green' },
-              { from:4, to:0, label:'← MCP tool result → LLM → natural language', sub:'', color:'green' },
+              { from:0, to:4, label:'PKCE authorize (Web App cid) + POST /org-token → BFF Lambda', sub:'code_challenge · scope=openid · client_secret_post exchange', color:'violet', note:'Get org ID token' },
+              { from:4, to:0, label:'← org_id_token (iss: org AS, cid: Web App)', sub:'iss: zelemon.oktapreview.com', color:'violet' },
+              { from:0, to:1, label:'POST /invocations {prompt, id_token}', sub:'Authorization: Bearer <org-id-token> · X-Amzn-…-Session-Id header', color:'indigo', note:'AgentCore Runtime' },
+              { from:1, to:2, label:'MCPClient connect (tools/initialize)', sub:'X-ID-Token: <org-id-token> · X-Agent-ID: expenses-agent', color:'teal', note:'Gateway intercepts all MCP' },
+              { from:2, to:3, label:'REQUEST interceptor fired', sub:'passRequestHeaders: true — full headers passed to Lambda', color:'amber' },
+              { from:3, to:4, label:'Stage 2 — token-exchange (pkjwt)', sub:'grant=urn:ietf:params:oauth:grant-type:token-exchange · requested=id_jag', color:'purple' },
+              { from:4, to:3, label:'← ID-JAG (act.sub: AI Agent)', sub:'iss: org AS · expires_in: 300s', color:'purple' },
+              { from:3, to:4, label:'Stage 3 — jwt-bearer (pkjwt)', sub:'assertion=ID-JAG · client_assertion=AI Agent · scope=expenses:*', color:'purple' },
+              { from:4, to:3, label:'← expenses access_token', sub:'scp: expenses:read write delete · iss: custom AS', color:'green' },
+              { from:3, to:2, label:'← transformedGatewayRequest', sub:'Authorization: Bearer <expenses-token> injected', color:'teal' },
+              { from:2, to:5, label:'tools/list · Authorization: Bearer <expenses-token>', sub:'MCP Server validates JWT via Okta JWKS', color:'green' },
+              { from:5, to:2, label:'← 3 tools: list_expenses, create_expense, delete_expense', sub:'auto-discovered via MCP protocol', color:'green' },
+              { from:2, to:1, label:'← MCP session ready (3 tools)', sub:'Strands Agent + Bedrock LLM invoked with tool definitions', color:'teal' },
+              { from:1, to:2, label:'tools/call list_expenses', sub:'X-ID-Token: <org-id-token> · X-Agent-ID: expenses-agent  (XAA repeats per call)', color:'teal', note:'Tool invocation' },
+              { from:2, to:3, label:'REQUEST interceptor fired (per-call)', sub:'new XAA exchange — secrets cached in Lambda warm env', color:'amber' },
+              { from:3, to:4, label:'XAA exchange (stages 2+3)', sub:'org ID token → ID-JAG → expenses access token', color:'purple' },
+              { from:4, to:3, label:'← expenses access_token', sub:'', color:'purple' },
+              { from:3, to:2, label:'← transformedGatewayRequest (Bearer injected)', sub:'', color:'teal' },
+              { from:2, to:5, label:'list_expenses → REST API → DynamoDB', sub:'API Gateway JWT authorizer re-validates token · scp: expenses:read', color:'green' },
+              { from:5, to:2, label:'← expense records (JSON)', sub:'', color:'green' },
+              { from:2, to:1, label:'← tool result', sub:'Strands routes result to Bedrock for synthesis', color:'teal' },
+              { from:1, to:0, label:'← {response, debug: [...]}', sub:'debug[] contains all arch steps replayed in Dev Console', color:'indigo' },
             ];
             const container = document.getElementById('seq-diagram');
             const colorMap = {
               violet:'border-violet-200 text-violet-700 bg-violet-50',
               purple:'border-purple-200 text-purple-700 bg-purple-50',
               indigo:'border-indigo-200 text-indigo-700 bg-indigo-50',
-              green:'border-teal-200 text-teal-700 bg-teal-50',
+              teal:  'border-teal-200 text-teal-700 bg-teal-50',
+              green: 'border-green-200 text-green-700 bg-green-50',
+              amber: 'border-amber-200 text-amber-700 bg-amber-50',
             };
-            const pct = c => (c * 20 + 10) + '%';
+            const N = 6;
+            const pct = c => ((c * 100/N) + (100/(N*2))).toFixed(1) + '%';
+            const rightPct = c => (100 - parseFloat(pct(c))).toFixed(1) + '%';
             msgs.forEach(m => {
               const minC = Math.min(m.from, m.to);
               const maxC = Math.max(m.from, m.to);
-              const right = m.label.startsWith('←');
+              const isSelf = m.from === m.to;
               const wrap = document.createElement('div');
               wrap.className = 'relative';
-              wrap.style.minHeight = '48px';
+              wrap.style.minHeight = '44px';
+              const cols = Array.from({length:N}, (_,i) =>
+                `<div class="flex justify-center"><div class="w-px bg-slate-100" style="height:44px"></div></div>`
+              ).join('');
               wrap.innerHTML = `
-                <div class="grid grid-cols-5 h-full" style="min-height:48px">
-                  ${[0,1,2,3,4].map(i=>`<div class="flex justify-center"><div class="w-px bg-slate-100" style="height:48px"></div></div>`).join('')}
-                </div>
-                <div class="absolute inset-y-1 flex items-center" style="left:${pct(minC)};right:calc(${100-parseInt(pct(maxC))}%)">
-                  <div class="w-full border ${colorMap[m.color]} rounded px-1.5 py-0.5 text-center">
-                    <div style="font-size:9px;font-weight:600;line-height:1.3">${m.label}</div>
-                    ${m.sub?`<div style="font-size:8px;opacity:0.7;font-family:monospace;line-height:1.2">${m.sub}</div>`:''}
+                <div class="grid h-full" style="grid-template-columns:repeat(${N},1fr);min-height:44px">${cols}</div>
+                <div class="absolute inset-y-1 flex items-center" style="left:${pct(minC)};right:${rightPct(maxC)}">
+                  <div class="w-full border ${colorMap[m.color]||colorMap.indigo} rounded px-1.5 py-0.5 text-center">
+                    <div style="font-size:8.5px;font-weight:600;line-height:1.3">${m.label}</div>
+                    ${m.sub?`<div style="font-size:7.5px;opacity:0.7;font-family:monospace;line-height:1.2">${m.sub}</div>`:''}
                   </div>
                 </div>
-                ${m.note?`<div class="absolute right-1" style="top:50%;transform:translateY(-50%);font-size:8px;font-weight:700;color:#94a3b8;font-style:italic">${m.note}</div>`:''}
+                ${m.note?`<div class="absolute right-0.5" style="top:50%;transform:translateY(-50%);font-size:7.5px;font-weight:700;color:#94a3b8;font-style:italic;max-width:60px;text-align:right">${m.note}</div>`:''}
               `;
               container.appendChild(wrap);
             });
@@ -1501,12 +1518,18 @@ let _consoleOpen   = false;
 let _consoleVerbose = false;   // false = Demo mode (key lines only)
 
 function _isImportant(source, level, msg) {
-  if (level === 'err') return true;                              // always show errors
-  if (source === 'XAA' && (level === 'ok' || level === 'tok')) return true;  // token results
-  if (source === 'XAA' && level === 'req' &&
-      (msg.includes('Stage 2') || msg.includes('Stage 3')))     return true;  // stage headers
-  if (source === 'Lambda' && level === 'ok' &&
-      msg.includes('response received'))                          return true;  // final answer
+  if (level === 'err') return true;
+  if (source === 'Okta' && level === 'ok') return true;              // token exchange results
+  if (source === 'Okta' && level === 'req' &&
+      (msg.includes('Stage 2') || msg.includes('Stage 3'))) return true;
+  if (source === 'Interceptor' && level === 'ok') return true;       // token injected
+  if (source === 'Gateway' && level === 'ok') return true;           // connection + tool complete
+  if (source === 'Gateway' && level === 'req' &&
+      msg.startsWith('tools/call')) return true;                     // tool invocations
+  if (source === 'MCP' && level === 'ok') return true;               // tool results
+  if (source === 'Bedrock' && level === 'ok') return true;           // synthesis complete
+  if (source === 'Runtime' && level === 'ok') return true;           // done
+  if (source === 'Browser' && (level === 'ok' || level === 'req')) return true;
   return false;
 }
 
@@ -1543,7 +1566,13 @@ function dbg(source, level, msg, payload) {
   const id  = 'ce' + (++_entryCounter);
   const ts  = new Date().toLocaleTimeString('en-GB', {
     hour:'2-digit', minute:'2-digit', second:'2-digit', fractionalSecondDigits:3 });
-  const srcClass = source === 'Browser' ? 'src-browser' : source === 'Lambda' ? 'src-lambda' : 'src-xaa';
+  const _srcMap = {
+    Browser:'src-browser', Runtime:'src-runtime', Bedrock:'src-bedrock',
+    Gateway:'src-gateway', Interceptor:'src-interceptor', Okta:'src-okta', MCP:'src-mcp',
+    // legacy aliases
+    Lambda:'src-runtime', XAA:'src-okta',
+  };
+  const srcClass = _srcMap[source] || 'src-okta';
   const lvlClass = level === 'ok' ? 'lvl-ok' : level === 'err' ? 'lvl-err' :
                    level === 'tok' ? 'lvl-tok' : level === 'req' ? 'lvl-req' : '';
   const hasPayload = payload !== undefined && payload !== null;
@@ -1743,6 +1772,14 @@ async function sendMessage(text) {
       body: JSON.stringify({ prompt: text, id_token: orgIdToken }),
     });
     const data = await resp.json();
+
+    // Replay structured debug events emitted by the AgentCore Runtime agent
+    if (Array.isArray(data.debug)) {
+      data.debug.forEach(e => {
+        const label = e.ms != null ? `${e.msg}  [+${e.ms}ms]` : e.msg;
+        dbg(e.source || 'Runtime', e.level || 'info', label, e.data || null);
+      });
+    }
 
     if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
 
