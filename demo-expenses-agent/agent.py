@@ -21,6 +21,7 @@ These events are rendered in the browser Dev Console.
 import logging
 import os
 import time
+import uuid
 from contextlib import asynccontextmanager
 
 import httpx
@@ -55,14 +56,22 @@ Guidelines:
 
 
 class _AuthHeaderTransport(httpx.AsyncBaseTransport):
-    """Injects Authorization, X-ID-Token, and X-Agent-ID on every outbound MCP request."""
+    """Injects Authorization, X-ID-Token, X-Agent-ID, and X-Prompt-Nonce on every request.
 
-    def __init__(self, transport: httpx.AsyncBaseTransport, token: str, agent_id: str):
+    X-Prompt-Nonce is a per-invocation UUID that scopes the interceptor's
+    token cache to the current user prompt.  A new prompt → new nonce →
+    cache miss → fresh XAA exchange.  Tool calls within the same prompt
+    share the nonce and reuse the cached token.
+    """
+
+    def __init__(self, transport: httpx.AsyncBaseTransport, token: str,
+                 agent_id: str, prompt_nonce: str):
         self._transport = transport
         self._headers = {
             "Authorization": f"Bearer {token}",
             "X-ID-Token": token,
             "X-Agent-ID": agent_id,
+            "X-Prompt-Nonce": prompt_nonce,
         }
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
@@ -71,10 +80,10 @@ class _AuthHeaderTransport(httpx.AsyncBaseTransport):
 
 
 @asynccontextmanager
-async def _mcp_transport(mcp_url: str, token: str, agent_id: str):
+async def _mcp_transport(mcp_url: str, token: str, agent_id: str, prompt_nonce: str):
     timeout = httpx.Timeout(30.0, read=300.0)
     base = httpx.AsyncHTTPTransport()
-    wrapped = _AuthHeaderTransport(base, token, agent_id)
+    wrapped = _AuthHeaderTransport(base, token, agent_id, prompt_nonce)
     async with httpx.AsyncClient(
         transport=wrapped, timeout=timeout, follow_redirects=True
     ) as client:
@@ -82,8 +91,8 @@ async def _mcp_transport(mcp_url: str, token: str, agent_id: str):
             yield streams
 
 
-def _create_mcp_transport(mcp_url: str, token: str, agent_id: str):
-    return _mcp_transport(mcp_url, token, agent_id)
+def _create_mcp_transport(mcp_url: str, token: str, agent_id: str, prompt_nonce: str):
+    return _mcp_transport(mcp_url, token, agent_id, prompt_nonce)
 
 
 def _xaa_chain(debug: list, step_label: str, t0: float, cached: bool = False) -> None:
@@ -146,14 +155,18 @@ def strands_agent(payload, context):
     if not id_token:
         return {"error": "id_token is required", "debug": debug}
 
+    # One nonce per prompt — scopes the interceptor's token cache to this invocation.
+    # New prompt → new nonce → interceptor cache miss → fresh XAA exchange.
+    prompt_nonce = str(uuid.uuid4())
+
     d("Runtime", "req",
-      f"Agent invoked — prompt_len={len(prompt)} agent_id={AGENT_ID}")
+      f"Agent invoked — prompt_len={len(prompt)} agent_id={AGENT_ID} nonce={prompt_nonce[:8]}…")
     d("Runtime", "info",
       f"AgentCore Gateway: {GATEWAY_MCP_URL.split('.gateway.')[0].split('/')[-1]}…/mcp")
 
     try:
         mcp_client = MCPClient(
-            lambda: _create_mcp_transport(GATEWAY_MCP_URL, id_token, AGENT_ID)
+            lambda: _create_mcp_transport(GATEWAY_MCP_URL, id_token, AGENT_ID, prompt_nonce)
         )
 
         d("Gateway", "req",

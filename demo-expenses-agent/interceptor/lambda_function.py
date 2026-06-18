@@ -59,7 +59,11 @@ REGION = os.environ.get("AWS_REGION", "us-east-1")
 _secrets_client = boto3.client("secretsmanager", region_name=REGION)
 _secret_cache: dict[str, dict] = {}
 
-# Access token cache — keyed by (agent_id, user_sub), value: {token, exp}
+# Access token cache — keyed by (agent_id, user_sub, prompt_nonce).
+# The nonce is a per-prompt UUID sent by the agent as X-Prompt-Nonce.
+# Each new user prompt brings a new nonce, so the cache is automatically
+# prompt-scoped: tool calls within one prompt reuse the token, but the
+# next prompt always triggers a fresh XAA exchange regardless of TTL.
 _token_cache: dict[tuple, dict] = {}
 TOKEN_CACHE_BUFFER_SECS = 60   # evict tokens expiring within this window
 
@@ -94,18 +98,19 @@ def _jwt_exp(raw_jwt: str) -> int:
         return 0
 
 
-def _cached_token(agent_id: str, user_sub: str) -> str | None:
-    entry = _token_cache.get((agent_id, user_sub))
+def _cached_token(agent_id: str, user_sub: str, prompt_nonce: str) -> str | None:
+    entry = _token_cache.get((agent_id, user_sub, prompt_nonce))
     if entry and entry["exp"] - TOKEN_CACHE_BUFFER_SECS > time.time():
-        logger.info("Token cache hit for agent=%s sub=%.12s…", agent_id, user_sub)
+        logger.info("Token cache hit for agent=%s sub=%.12s… nonce=%.8s…",
+                    agent_id, user_sub, prompt_nonce)
         return entry["token"]
     return None
 
 
-def _cache_token(agent_id: str, user_sub: str, token: str) -> None:
+def _cache_token(agent_id: str, user_sub: str, prompt_nonce: str, token: str) -> None:
     exp = _jwt_exp(token)
     if exp:
-        _token_cache[(agent_id, user_sub)] = {"token": token, "exp": exp}
+        _token_cache[(agent_id, user_sub, prompt_nonce)] = {"token": token, "exp": exp}
 
 
 # ── Secrets Manager ────────────────────────────────────────────────────────────
@@ -214,6 +219,8 @@ def lambda_handler(event, context):
     agent_id = (
         headers.get("X-Agent-ID") or headers.get("x-agent-id") or "expenses-agent"
     )
+    # X-Prompt-Nonce is a per-prompt UUID from the agent — scopes the cache to one prompt
+    prompt_nonce = headers.get("X-Prompt-Nonce") or headers.get("x-prompt-nonce", "")
 
     if not org_id_token:
         logger.warning("No X-ID-Token in request headers — forwarding without auth")
@@ -222,14 +229,15 @@ def lambda_handler(event, context):
     try:
         user_sub = _jwt_sub(org_id_token)
 
-        # Check in-memory token cache first (avoids full XAA on warm invocations)
-        cached = _cached_token(agent_id, user_sub)
+        # Cache hit: same prompt (same nonce) → reuse token, skip XAA
+        cached = _cached_token(agent_id, user_sub, prompt_nonce)
         if cached:
             return _build_response(body, auth_header=f"Bearer {cached}")
 
+        # Cache miss: new prompt (new nonce) or first call → full XAA exchange
         secret = _load_secret(agent_id)
         expenses_token = _run_xaa(org_id_token, secret)
-        _cache_token(agent_id, user_sub, expenses_token)
+        _cache_token(agent_id, user_sub, prompt_nonce, expenses_token)
         return _build_response(body, auth_header=f"Bearer {expenses_token}")
     except Exception as e:
         logger.exception("XAA exchange failed: %s", e)
