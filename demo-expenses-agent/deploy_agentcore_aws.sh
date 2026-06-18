@@ -74,6 +74,9 @@ GATEWAY_TARGET_NAME="expenses-mcp-server"
 RUNTIME_NAME="expenses_chat_agent"
 RUNTIME_ROLE_NAME="expenses-agentcore-runtime-role"
 ECR_REPO="expenses-chat-agent"
+# Versioned tag forces AgentCore Runtime to pull the new image on every deploy
+# (using :latest risks the Runtime reusing a warm cached container)
+IMAGE_TAG="v$(date +%Y%m%d%H%M%S)"
 
 BFF_FUNCTION_NAME="expenses-bff-org-token"
 BFF_ROLE_NAME="expenses-bff-role"
@@ -385,10 +388,10 @@ fi
 aws ecr get-login-password --region "$REGION" | \
   docker login --username AWS --password-stdin "${ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com"
 
-docker build --platform linux/arm64 -t "${ECR_REPO}:latest" "$SCRIPT_DIR" -q
-docker tag "${ECR_REPO}:latest" "${ECR_URI}:latest"
-docker push "${ECR_URI}:latest" --quiet
-echo "    Image pushed: ${ECR_URI}:latest"
+docker build --platform linux/arm64 -t "${ECR_REPO}:${IMAGE_TAG}" "$SCRIPT_DIR" -q
+docker tag "${ECR_REPO}:${IMAGE_TAG}" "${ECR_URI}:${IMAGE_TAG}"
+docker push "${ECR_URI}:${IMAGE_TAG}" --quiet
+echo "    Image pushed: ${ECR_URI}:${IMAGE_TAG}"
 
 # ─────────────────────────────────────────────
 # 5. AgentCore Runtime IAM role
@@ -489,7 +492,7 @@ EXISTING_RUNTIME_ARN=$(aws bedrock-agentcore-control list-agent-runtimes --regio
 if [ -z "$EXISTING_RUNTIME_ARN" ]; then
   RUNTIME_RESPONSE=$(aws bedrock-agentcore-control create-agent-runtime \
     --agent-runtime-name "$RUNTIME_NAME" \
-    --agent-runtime-artifact "{\"containerConfiguration\":{\"containerUri\":\"${ECR_URI}:latest\"}}" \
+    --agent-runtime-artifact "{\"containerConfiguration\":{\"containerUri\":\"${ECR_URI}:${IMAGE_TAG}\"}}" \
     --authorizer-configuration "$AUTHORIZER_CONFIG" \
     --network-configuration '{"networkMode":"PUBLIC"}' \
     --environment-variables "$RUNTIME_ENV_VARS" \
@@ -501,7 +504,7 @@ else
   RUNTIME_ARN="$EXISTING_RUNTIME_ARN"
   aws bedrock-agentcore-control update-agent-runtime \
     --agent-runtime-id "$(basename "$RUNTIME_ARN")" \
-    --agent-runtime-artifact "{\"containerConfiguration\":{\"containerUri\":\"${ECR_URI}:latest\"}}" \
+    --agent-runtime-artifact "{\"containerConfiguration\":{\"containerUri\":\"${ECR_URI}:${IMAGE_TAG}\"}}" \
     --authorizer-configuration "$AUTHORIZER_CONFIG" \
     --environment-variables "$RUNTIME_ENV_VARS" \
     --role-arn "$RUNTIME_ROLE_ARN" \

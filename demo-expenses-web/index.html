@@ -1186,7 +1186,6 @@ async function logout() {
   // Clear org ID token
   sessionStorage.removeItem('orgIdToken');
   sessionStorage.removeItem('orgIdTokenExp');
-  sessionStorage.removeItem('agentSessionId');
   _orgIdToken    = null;
   _orgIdTokenExp = 0;
   // Revoke tokens and clear local storage, then navigate to root directly
@@ -1745,12 +1744,11 @@ async function sendMessage(text) {
       const parts = orgIdToken.split('.');
       tokenPreview.claims = JSON.parse(atob(parts[1].replace(/-/g,'+').replace(/_/g,'/')));
     } catch(_) {}
-    // Stable session ID — persists across turns, cleared on logout
-    const sessionId = sessionStorage.getItem('agentSessionId') || (() => {
-      const id = crypto.randomUUID();
-      sessionStorage.setItem('agentSessionId', id);
-      return id;
-    })();
+    // Per-prompt session ID — new UUID on every request.
+    // The agent is stateless between prompts, so no conversation context is lost.
+    // A fresh ID also ensures AgentCore Runtime uses the latest container config
+    // rather than routing to a warm container from a previous session.
+    const sessionId = crypto.randomUUID();
 
     dbg('Browser', 'req', `POST AgentCore Runtime`, {
       url:     cfg.agent.chatUrl,
