@@ -1159,7 +1159,7 @@ async function login() {
   // Start with org AS (Web App) to get org ID token for AI Agent.
   // On return, init() chains to custom AS (SSO — no second login prompt).
   // If org AS not configured (no webappClientId), fall back to direct custom AS login.
-  if (window.APP_CONFIG?.okta?.webappClientId && window.APP_CONFIG?.agent?.chatUrl) {
+  if (window.APP_CONFIG?.okta?.webappClientId && window.APP_CONFIG?.agent?.chatUrl && window.APP_CONFIG?.agent?.orgTokenUrl) {
     await initiateOrgAuth();
   } else {
     await authClient.signInWithRedirect();
@@ -1169,6 +1169,7 @@ async function logout() {
   // Clear org ID token
   sessionStorage.removeItem('orgIdToken');
   sessionStorage.removeItem('orgIdTokenExp');
+  sessionStorage.removeItem('agentSessionId');
   _orgIdToken    = null;
   _orgIdTokenExp = 0;
   // Revoke tokens and clear local storage, then navigate to root directly
@@ -1631,8 +1632,8 @@ async function _handleOrgASCallback() {
   sessionStorage.removeItem('orgAS_state');
   window.history.replaceState({}, document.title, window.location.pathname);
 
-  dbg('Browser', 'req', 'Exchanging org AS code via Lambda /org-token…');
-  const orgTokenUrl = window.APP_CONFIG.agent.chatUrl.replace(/\/chat$/, '/org-token');
+  dbg('Browser', 'req', 'Exchanging org AS code via BFF /org-token…');
+  const orgTokenUrl = window.APP_CONFIG.agent.orgTokenUrl;
   const resp = await fetch(orgTokenUrl, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -1696,8 +1697,8 @@ async function submitChat() {
 
 async function sendMessage(text) {
   const cfg = window.APP_CONFIG;
-  if (!cfg?.agent?.chatUrl) {
-    appendAgentMessage('⚠️ Chat API not configured. Run deploy_agent_aws.sh then redeploy the web app.');
+  if (!cfg?.agent?.chatUrl || !cfg?.agent?.orgTokenUrl) {
+    appendAgentMessage('⚠️ Chat API not configured. Run deploy_agentcore_aws.sh then redeploy the web app.');
     return;
   }
 
@@ -1715,14 +1716,18 @@ async function sendMessage(text) {
       const parts = orgIdToken.split('.');
       tokenPreview.claims = JSON.parse(atob(parts[1].replace(/-/g,'+').replace(/_/g,'/')));
     } catch(_) {}
-    dbg('Browser', 'req', `POST ${cfg.agent.chatUrl}`, {
+    // Stable session ID — persists across turns, cleared on logout
+    const sessionId = sessionStorage.getItem('agentSessionId') || (() => {
+      const id = crypto.randomUUID();
+      sessionStorage.setItem('agentSessionId', id);
+      return id;
+    })();
+
+    dbg('Browser', 'req', `POST AgentCore Runtime`, {
       url:     cfg.agent.chatUrl,
-      headers: { 'Content-Type': 'application/json' },
-      body: {
-        message:    text,
-        orgIdToken: tokenPreview.raw,
-      },
-      'orgIdToken (decoded)': tokenPreview.claims
+      headers: { 'Authorization': 'Bearer <org-id-token>', 'X-Amzn-Bedrock-AgentCore-Runtime-Session-Id': sessionId },
+      body: { prompt: text, id_token: tokenPreview.raw },
+      'id_token (decoded)': tokenPreview.claims
         ? { iss: tokenPreview.claims.iss, sub: tokenPreview.claims.sub,
             aud: tokenPreview.claims.aud, exp: new Date(tokenPreview.claims.exp*1000).toISOString() }
         : '(decode failed)',
@@ -1730,15 +1735,14 @@ async function sendMessage(text) {
 
     const resp = await fetch(cfg.agent.chatUrl, {
       method:  'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body:    JSON.stringify({ message: text, orgIdToken }),
+      headers: {
+        'Content-Type':  'application/json',
+        'Authorization': `Bearer ${orgIdToken}`,
+        'X-Amzn-Bedrock-AgentCore-Runtime-Session-Id': sessionId,
+      },
+      body: JSON.stringify({ prompt: text, id_token: orgIdToken }),
     });
     const data = await resp.json();
-
-    // Render server-side debug events from Lambda
-    if (Array.isArray(data.debug)) {
-      data.debug.forEach(e => dbg(e.source || 'Lambda', e.level || 'info', e.msg, e.data || null));
-    }
 
     if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
 

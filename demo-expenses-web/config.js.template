@@ -11,6 +11,7 @@ window.APP_CONFIG = {
     baseUrl: "__EXPENSES_API_URL__"
   },
   agent: {
-    chatUrl: "__CHAT_API_URL__"
+    chatUrl: "__CHAT_API_URL__",
+    orgTokenUrl: "__ORG_TOKEN_URL__"
   }
 };

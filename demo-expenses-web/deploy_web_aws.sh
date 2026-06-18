@@ -21,12 +21,15 @@ OKTA_AUDIENCE="${OKTA_AUDIENCE:-api://expenses}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# Optional: AI agent chat URL — auto-read from .deploy-agent-state if present
-AGENT_STATE="$SCRIPT_DIR/../demo-expenses-agent/.deploy-agent-state"
-if [ -z "${CHAT_API_URL:-}" ] && [ -f "$AGENT_STATE" ]; then
-  CHAT_API_URL=$(grep ^CHAT_API_URL= "$AGENT_STATE" | cut -d= -f2 || true)
+# Optional: AI agent URLs — auto-read from .deploy-agentcore-state if present
+AGENTCORE_STATE="$SCRIPT_DIR/../demo-expenses-agent/.deploy-agentcore-state"
+if [ -f "$AGENTCORE_STATE" ]; then
+  # Use cut -f2- (not -f2) to preserve = characters inside URL values (e.g. ?qualifier=DEFAULT)
+  [ -z "${CHAT_API_URL:-}" ]  && CHAT_API_URL=$(grep  ^RUNTIME_INVOCATION_URL= "$AGENTCORE_STATE" | cut -d= -f2- || true)
+  [ -z "${ORG_TOKEN_URL:-}" ] && ORG_TOKEN_URL=$(grep ^ORG_TOKEN_URL=          "$AGENTCORE_STATE" | cut -d= -f2- || true)
 fi
 CHAT_API_URL="${CHAT_API_URL:-__CHAT_API_URL__}"
+ORG_TOKEN_URL="${ORG_TOKEN_URL:-__ORG_TOKEN_URL__}"
 
 # Optional: Okta org base URL — strip custom AS path from OKTA_ISSUER if not set
 if [ -z "${OKTA_ORG_URL:-}" ] && [ -n "${OKTA_ISSUER:-}" ]; then
@@ -232,9 +235,7 @@ echo "    Bucket policy applied (CloudFront OAC only — bucket stays private)."
 echo ""
 echo ">>> [4/6] Generating config.js"
 CONFIG_JS="$SCRIPT_DIR/config.js"
-# Auto-read OKTA_WEBAPP_CLIENT_ID from agent deploy state if not set
-AGENT_WEBAPP_CLIENT_ID=$(grep ^OKTA_WEBAPP_CLIENT_ID= "$AGENT_STATE" 2>/dev/null | cut -d= -f2 || true)
-OKTA_WEBAPP_CLIENT_ID="${OKTA_WEBAPP_CLIENT_ID:-${AGENT_WEBAPP_CLIENT_ID:-__OKTA_WEBAPP_CLIENT_ID__}}"
+OKTA_WEBAPP_CLIENT_ID="${OKTA_WEBAPP_CLIENT_ID:-__OKTA_WEBAPP_CLIENT_ID__}"
 
 sed \
   -e "s|__OKTA_ISSUER__|${OKTA_ISSUER}|g" \
@@ -243,6 +244,7 @@ sed \
   -e "s|__EXPENSES_API_URL__|${EXPENSES_API_URL}|g" \
   -e "s|__OKTA_ORG_URL__|${OKTA_ORG_URL}|g" \
   -e "s|__CHAT_API_URL__|${CHAT_API_URL}|g" \
+  -e "s|__ORG_TOKEN_URL__|${ORG_TOKEN_URL}|g" \
   -e "s|__OKTA_WEBAPP_CLIENT_ID__|${OKTA_WEBAPP_CLIENT_ID}|g" \
   "$SCRIPT_DIR/config.js.template" > "$CONFIG_JS"
 echo "    config.js written."
