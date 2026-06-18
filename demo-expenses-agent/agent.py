@@ -20,6 +20,7 @@ These events are rendered in the browser Dev Console.
 
 import logging
 import os
+import threading
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -182,21 +183,63 @@ def strands_agent(payload, context):
             d("Gateway", "ok",
               f"MCP session ready — {len(tools)} tools available via Gateway → MCP Server")
 
-            agent = Agent(
-                model=BedrockModel(
-                    model_id=MODEL_ID,
-                    region_name=os.environ.get("AWS_REGION", "us-east-1"),
-                ),
-                tools=tools,
-                system_prompt=SYSTEM_PROMPT,
-            )
+            # ── Real-time Strands callback ──────────────────────────────
+            # Captures per-phase timing AS IT HAPPENS during agent(prompt),
+            # not post-hoc.  Events are appended to debug[] with accurate ms.
+            _lock = threading.Lock()
+            _tool_start_ms: dict[str, int] = {}   # toolUseId → ms when call started
 
+            def _on_event(**kwargs):
+                now_ms = round((time.time() - t0) * 1000)
+
+                # LLM decided to call a tool (fires before the actual MCP call)
+                if "current_tool_use" in kwargs:
+                    tc = kwargs["current_tool_use"]
+                    if isinstance(tc, dict):
+                        name = tc.get("name", "?")
+                        tid  = tc.get("toolUseId", "")
+                        inp  = tc.get("input", {})
+                        with _lock:
+                            _tool_start_ms[tid] = now_ms
+                            debug.append({"source": "Gateway", "level": "req",
+                                          "msg": f"tools/call {name}",
+                                          "ms": now_ms,
+                                          "data": {"input": inp} if inp else None})
+                        _xaa_chain(debug, f"tools/call/{name}", t0, cached=True)
+                        with _lock:
+                            debug.append({"source": "MCP", "level": "req",
+                                          "msg": f"Forwarding {name} to MCP Server"
+                                                 f" (App Runner → REST API → DynamoDB)",
+                                          "ms": now_ms})
+
+                # Per-LLM-call metrics (fires after each Bedrock converse call)
+                if "event_loop_metrics" in kwargs:
+                    m = kwargs["event_loop_metrics"]
+                    try:
+                        lats = getattr(m, "latencies", [])
+                        for i, lat in enumerate(lats):
+                            lat_ms  = getattr(lat, "latency_ms", None)
+                            in_tok  = getattr(lat, "input_tokens", "?")
+                            out_tok = getattr(lat, "output_tokens", "?")
+                            if lat_ms is not None:
+                                with _lock:
+                                    debug.append({"source": "Bedrock", "level": "info",
+                                                  "msg": f"LLM call {i+1}/{len(lats)}: "
+                                                         f"{lat_ms}ms  "
+                                                         f"({in_tok} in / {out_tok} out tokens)",
+                                                  "ms": now_ms})
+                    except Exception as ex:
+                        logger.warning("Strands metrics extraction failed: %s", ex)
+
+            # ── Agent invocation with timing ────────────────────────────
             d("Bedrock", "req",
-              f"Invoking {MODEL_ID.split('/')[0] if '/' in MODEL_ID else MODEL_ID} "
-              f"with {len(tools)} tools")
-            response = agent(prompt)
+              f"Invoking {MODEL_ID.split('/')[-1].split(':')[0]} with {len(tools)} tools")
+            t_agent_start = time.time()
+            response = agent(prompt, callback_handler=_on_event)
+            t_agent_end   = time.time()
+            agent_ms = round((t_agent_end - t_agent_start) * 1000)
 
-            # Extract tool calls and results from Strands message history
+            # ── Extract tool results for MCP completion events ──────────
             tool_calls: list[dict] = []
             tool_results: dict[str, dict] = {}
             try:
@@ -212,36 +255,31 @@ def strands_agent(payload, context):
             except Exception as ex:
                 logger.warning("Could not extract tool calls from agent history: %s", ex)
 
-            # Emit per-tool-call events (Gateway → Interceptor → Okta → MCP chain)
+            # Emit MCP completion events with accurate timing
             for tc in tool_calls:
-                name = tc.get("name", "?")
-                tool_input = tc.get("input", {})
+                name       = tc.get("name", "?")
                 tool_use_id = tc.get("toolUseId", "")
-                tr = tool_results.get(tool_use_id, {})
-                tr_status = tr.get("status", "success")
+                tr         = tool_results.get(tool_use_id, {})
+                tr_status  = tr.get("status", "success")
+                start_ms   = _tool_start_ms.get(tool_use_id)
 
-                d("Gateway", "req",
-                  f"tools/call {name}",
-                  {"input": tool_input} if tool_input else None)
-                # Subsequent calls hit the interceptor's in-memory token cache
-                # (warm Lambda, same user sub, token still valid)
-                _xaa_chain(debug, f"tools/call/{name}", t0, cached=True)
-                d("MCP", "req",
-                  f"Forwarding {name} to MCP Server (App Runner → REST API → DynamoDB)")
+                result_content = tr.get("content") or []
+                result_text = next(
+                    (rc["text"][:120] for rc in result_content
+                     if isinstance(rc, dict) and "text" in rc),
+                    ""
+                )
+                elapsed_tool = (
+                    f" [{round((time.time() - t0) * 1000) - start_ms}ms]"
+                    if start_ms else ""
+                )
                 if tr_status == "success":
-                    # Try to extract a brief result summary
-                    result_content = tr.get("content") or []
-                    result_text = ""
-                    for rc in result_content:
-                        if isinstance(rc, dict) and "text" in rc:
-                            result_text = rc["text"][:120]
-                            break
                     d("MCP", "ok",
-                      f"{name} complete — result forwarded to Bedrock"
+                      f"{name} complete{elapsed_tool} — result forwarded to Bedrock"
                       + (f" ({result_text[:80]}…)" if len(result_text) > 80 else
                          (f" ({result_text})" if result_text else "")))
                 else:
-                    d("MCP", "err", f"{name} returned status: {tr_status}")
+                    d("MCP", "err", f"{name} returned status: {tr_status}{elapsed_tool}")
 
             # Final response
             content = response.message.get("content", []) if response.message else []
@@ -254,7 +292,8 @@ def strands_agent(payload, context):
             elapsed = round((time.time() - t0) * 1000)
             d("Bedrock", "ok", f"Response synthesized ({len(text)} chars)")
             d("Runtime", "ok",
-              f"Done — {len(tool_calls)} tool call(s), {elapsed}ms total")
+              f"Done — {len(tool_calls)} tool call(s), "
+              f"agent: {agent_ms}ms, total: {elapsed}ms")
 
             return {"response": text or str(response), "debug": debug}
 
