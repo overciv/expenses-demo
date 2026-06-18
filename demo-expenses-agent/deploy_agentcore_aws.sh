@@ -71,7 +71,7 @@ GATEWAY_NAME="expenses-mcp-gateway"
 GATEWAY_ROLE_NAME="expenses-gateway-role"
 GATEWAY_TARGET_NAME="expenses-mcp-server"
 
-RUNTIME_NAME="expenses-chat-agent"
+RUNTIME_NAME="expenses_chat_agent"
 RUNTIME_ROLE_NAME="expenses-agentcore-runtime-role"
 ECR_REPO="expenses-chat-agent"
 
@@ -300,17 +300,28 @@ else
 fi
 
 # Add MCP target pointing to App Runner MCP Server
-EXISTING_TARGET=$(aws bedrock-agentcore-control list-gateway-targets \
+EXISTING_TARGET_JSON=$(aws bedrock-agentcore-control list-gateway-targets \
   --gateway-identifier "$GATEWAY_ID" --region "$REGION" \
-  --query "items[?name=='$GATEWAY_TARGET_NAME'].targetId" --output text 2>/dev/null || echo "")
-[ "$EXISTING_TARGET" = "None" ] && EXISTING_TARGET=""
+  --output json 2>/dev/null || echo '{"items":[]}')
+EXISTING_TARGET=$(echo "$EXISTING_TARGET_JSON" | python3 -c "
+import json,sys
+items = json.load(sys.stdin).get('items', [])
+match = next((i for i in items if i['name'] == '${GATEWAY_TARGET_NAME}'), None)
+print(match['targetId'] if match else '')
+")
+EXISTING_TARGET_STATUS=$(echo "$EXISTING_TARGET_JSON" | python3 -c "
+import json,sys
+items = json.load(sys.stdin).get('items', [])
+match = next((i for i in items if i['name'] == '${GATEWAY_TARGET_NAME}'), None)
+print(match.get('status', '') if match else '')
+")
 
 MCP_TARGET_CONFIG=$(python3 -c "
 import json
 print(json.dumps({
   'mcp': {
-    'endpoint': {
-      'smithy': {'uri': '${MCP_SERVER_URL}'}
+    'mcpServer': {
+      'endpoint': '${MCP_SERVER_URL}'
     }
   }
 }))
@@ -323,14 +334,23 @@ if [ -z "$EXISTING_TARGET" ]; then
     --target-configuration "$MCP_TARGET_CONFIG" \
     --region "$REGION" --output text > /dev/null
   echo "    MCP target created → $MCP_SERVER_URL"
+elif [ "$EXISTING_TARGET_STATUS" = "READY" ]; then
+  echo "    MCP target already READY (${EXISTING_TARGET}) — skipping recreation"
 else
-  aws bedrock-agentcore-control update-gateway-target \
+  # FAILED or other — delete, wait for propagation, then recreate
+  echo "    MCP target status: ${EXISTING_TARGET_STATUS} — deleting and recreating..."
+  aws bedrock-agentcore-control delete-gateway-target \
     --gateway-identifier "$GATEWAY_ID" \
-    --target-identifier "$EXISTING_TARGET" \
+    --target-id "$EXISTING_TARGET" \
+    --region "$REGION" --output text > /dev/null 2>&1 || true
+  echo "    Waiting 15s for name to clear..."
+  sleep 15
+  aws bedrock-agentcore-control create-gateway-target \
+    --gateway-identifier "$GATEWAY_ID" \
     --name "$GATEWAY_TARGET_NAME" \
     --target-configuration "$MCP_TARGET_CONFIG" \
     --region "$REGION" --output text > /dev/null
-  echo "    MCP target updated → $MCP_SERVER_URL"
+  echo "    MCP target recreated → $MCP_SERVER_URL"
 fi
 
 # Attach interceptor to gateway
@@ -365,7 +385,7 @@ fi
 aws ecr get-login-password --region "$REGION" | \
   docker login --username AWS --password-stdin "${ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com"
 
-docker build --platform linux/amd64 -t "${ECR_REPO}:latest" "$SCRIPT_DIR" -q
+docker build --platform linux/arm64 -t "${ECR_REPO}:latest" "$SCRIPT_DIR" -q
 docker tag "${ECR_REPO}:latest" "${ECR_URI}:latest"
 docker push "${ECR_URI}:latest" --quiet
 echo "    Image pushed: ${ECR_URI}:latest"
@@ -463,7 +483,7 @@ print(json.dumps({
 ")
 
 EXISTING_RUNTIME_ARN=$(aws bedrock-agentcore-control list-agent-runtimes --region "$REGION" \
-  --query "items[?agentRuntimeName=='$RUNTIME_NAME'].agentRuntimeArn" --output text 2>/dev/null || echo "")
+  --query "agentRuntimes[?agentRuntimeName=='$RUNTIME_NAME'].agentRuntimeArn" --output text 2>/dev/null || echo "")
 [ "$EXISTING_RUNTIME_ARN" = "None" ] && EXISTING_RUNTIME_ARN=""
 
 if [ -z "$EXISTING_RUNTIME_ARN" ]; then
