@@ -1,5 +1,8 @@
+# AgentCore Runtime container dependencies
+bedrock-agentcore>=1.0.0
 strands-agents>=1.0.0
-okta-client-python>=0.2.0
-PyJWT>=2.8.0
-requests>=2.31.0
+httpx>=0.27.0
+mcp>=1.9.0
 boto3>=1.34.0
+requests>=2.31.0
+aws-opentelemetry-distro>=0.10.0

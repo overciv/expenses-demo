@@ -1,30 +1,38 @@
 """
-Strands agent for the ExpensePro chat assistant.
+ExpensePro AI Agent — AgentCore Runtime entrypoint.
 
-The agent uses the MCP server (FastMCP on App Runner) as its tool interface —
-the architecturally correct approach for an AI agent. The MCP server exposes
-list_expenses, create_expense, and delete_expense tools over streamable-HTTP.
+Runs as a container on AgentCore Runtime. The agent connects to the expenses
+MCP tools via AgentCore Gateway, sending two custom headers on every request:
 
-Token flow:
-  1. Okta Cross-App Access exchange → expenses access token
-  2. MCPClient connects to the MCP server with Bearer <access_token>
-  3. Strands discovers tools from MCP and invokes via standard MCP protocol
+  X-ID-Token  — the user's org-issued ID token (forwarded to the Gateway interceptor)
+  X-Agent-ID  — "expenses-agent" (used by the interceptor to look up XAA credentials
+                 from Secrets Manager at agentcore/xaa/expenses-agent)
+
+The AgentCore Gateway validates the inbound org ID token via its customJWTAuthorizer,
+strips the Authorization header, and fires the XAA interceptor Lambda.
+The interceptor exchanges the X-ID-Token for an expenses access token and injects
+Authorization: Bearer <expenses_token> before forwarding to the MCP Server.
 """
 
-import asyncio
 import logging
 import os
+from contextlib import asynccontextmanager
 
-from mcp.client.streamable_http import streamablehttp_client
+import httpx
+from bedrock_agentcore.runtime import BedrockAgentCoreApp
+from mcp.client.streamable_http import streamable_http_client
 from strands import Agent
 from strands.models import BedrockModel
 from strands.tools.mcp import MCPClient
 
-from okta_xaa import get_expenses_access_token
-
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-MCP_SERVER_URL = os.environ["MCP_SERVER_URL"]   # https://g45wqjhenu.us-east-1.awsapprunner.com/mcp
+app = BedrockAgentCoreApp()
+
+GATEWAY_MCP_URL = os.environ["GATEWAY_MCP_URL"]
+MODEL_ID = os.environ.get("MODEL_ID", "us.anthropic.claude-3-5-haiku-20241022-v1:0")
+AGENT_ID = os.environ.get("AGENT_ID", "expenses-agent")
 
 SYSTEM_PROMPT = """You are an AI expense management assistant for ExpensePro.
 You help authenticated users list, create, and delete company expense records on their behalf
@@ -41,56 +49,92 @@ Guidelines:
 """
 
 
-def invoke_agent(org_id_token: str, message: str, dbg=None) -> str:
-    """Perform the full XAA exchange, connect to MCP, and invoke the Strands agent.
+class _AuthHeaderTransport(httpx.AsyncBaseTransport):
+    """Injects Authorization, X-ID-Token, and X-Agent-ID on every outbound MCP request.
 
-    Replaces the old build_agent() + agent(message) pattern with a single call
-    that manages the MCP client lifecycle correctly within one Lambda invocation.
+    AgentCore Gateway uses Authorization to validate the inbound JWT (then strips it).
+    X-ID-Token is passed through to the XAA interceptor Lambda for token exchange.
+    X-Agent-ID tells the interceptor which Secrets Manager secret to use.
     """
-    _dbg = dbg or (lambda *a, **kw: None)
 
-    # ── Step 1: Okta Cross-App Access → expenses access token ─────────────
+    def __init__(self, transport: httpx.AsyncBaseTransport, token: str, agent_id: str):
+        self._transport = transport
+        self._headers = {
+            "Authorization": f"Bearer {token}",
+            "X-ID-Token": token,
+            "X-Agent-ID": agent_id,
+        }
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        request.headers.update(self._headers)
+        return await self._transport.handle_async_request(request)
+
+
+@asynccontextmanager
+async def _mcp_transport(mcp_url: str, token: str, agent_id: str):
+    timeout = httpx.Timeout(30.0, read=300.0)
+    base = httpx.AsyncHTTPTransport()
+    wrapped = _AuthHeaderTransport(base, token, agent_id)
+    async with httpx.AsyncClient(
+        transport=wrapped, timeout=timeout, follow_redirects=True
+    ) as client:
+        async with streamable_http_client(mcp_url, http_client=client) as streams:
+            yield streams
+
+
+def _create_mcp_transport(mcp_url: str, token: str, agent_id: str):
+    return _mcp_transport(mcp_url, token, agent_id)
+
+
+@app.entrypoint
+def strands_agent(payload, context):
+    """
+    AgentCore Runtime entrypoint. Receives the invocation payload from the caller.
+
+    Expected payload:
+      { "prompt": "<user message>", "id_token": "<org-issued ID token>" }
+    """
+    prompt = (payload.get("prompt") or "").strip()
+    id_token = (payload.get("id_token") or "").strip()
+
+    if not prompt:
+        return {"error": "prompt is required"}
+    if not id_token:
+        return {"error": "id_token is required — send the org-issued ID token from Okta"}
+
+    logger.info("Invoking agent: prompt_len=%d agent_id=%s", len(prompt), AGENT_ID)
+
     try:
-        access_token = get_expenses_access_token(org_id_token, dbg)
-    except Exception as e:
-        msg = f"Okta Cross-App Access failed: {e}"
-        _dbg("Lambda", "err", msg)
-        raise RuntimeError(msg) from e
-
-    # ── Step 2: Connect Strands agent to MCP server via streamable-HTTP ───
-    _dbg("Lambda", "req",
-         f"Connecting Strands agent to MCP server: {MCP_SERVER_URL}")
-
-    mcp_client = MCPClient(
-        lambda: streamablehttp_client(
-            MCP_SERVER_URL,
-            headers={"Authorization": f"Bearer {access_token}"},
+        mcp_client = MCPClient(
+            lambda: _create_mcp_transport(GATEWAY_MCP_URL, id_token, AGENT_ID)
         )
-    )
+        with mcp_client:
+            tools = mcp_client.list_tools_sync()
+            tool_names = [t.tool_name for t in tools]
+            logger.info("MCP tools discovered via Gateway: %s", ", ".join(tool_names))
 
-    with mcp_client:
-        tools = mcp_client.list_tools_sync()
-        tool_names = [t.tool_name for t in tools]
-        _dbg("Lambda", "ok",
-             f"MCP tools discovered: {', '.join(tool_names)}")
+            agent = Agent(
+                model=BedrockModel(
+                    model_id=MODEL_ID,
+                    region_name=os.environ.get("AWS_REGION", "us-east-1"),
+                ),
+                tools=tools,
+                system_prompt=SYSTEM_PROMPT,
+            )
+            response = agent(prompt)
 
-        agent = Agent(
-            model=BedrockModel(
-                model_id="us.anthropic.claude-3-5-haiku-20241022-v1:0",
-                region_name=os.environ.get("AWS_REGION", "us-east-1"),
-            ),
-            tools=tools,
-            system_prompt=SYSTEM_PROMPT,
-        )
-
-        response = agent(message)
-
-        # AgentResult.__str__ appends "\n" after every streaming chunk, producing
-        # garbled output when Bedrock streams many small text tokens.
-        # Extract and join text blocks directly — no inter-chunk newlines.
         content = response.message.get("content", []) if response.message else []
         text = "".join(
-            block["text"] for block in content
+            block["text"]
+            for block in content
             if isinstance(block, dict) and "text" in block
         ).strip()
-        return text or str(response)  # fallback to __str__ if no text blocks found
+        return {"response": text or str(response)}
+
+    except Exception as e:
+        logger.exception("Agent invocation failed")
+        return {"error": f"Agent error: {e}"}
+
+
+if __name__ == "__main__":
+    app.run()
