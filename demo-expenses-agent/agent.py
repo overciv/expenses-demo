@@ -86,24 +86,35 @@ def _create_mcp_transport(mcp_url: str, token: str, agent_id: str):
     return _mcp_transport(mcp_url, token, agent_id)
 
 
-def _xaa_chain(debug: list, step_label: str, t0: float) -> None:
-    """Emit the known interceptor → Okta XAA sequence for a given MCP request step."""
+def _xaa_chain(debug: list, step_label: str, t0: float, cached: bool = False) -> None:
+    """Emit the known interceptor → Okta XAA sequence for a given MCP request step.
+
+    cached=True when the token was served from the interceptor's in-memory cache
+    (no Okta round-trips needed — warm Lambda reuse within the ~1h token TTL).
+    """
     def d(source, level, msg):
         debug.append({"source": source, "level": level, "msg": msg,
                        "ms": round((time.time() - t0) * 1000)})
 
     d("Interceptor", "req",
       f"XAA exchange fired ({step_label}) — reading X-ID-Token from request headers")
-    d("Okta", "req",
-      "Stage 2: org ID token → ID-JAG  (org AS, token-exchange grant, pkjwt client_assertion)")
-    d("Okta", "ok",
-      "ID-JAG obtained (act.sub: AI Agent, iss: org AS, expires_in: 300s)")
-    d("Okta", "req",
-      "Stage 3: ID-JAG → expenses access token  (custom AS, jwt-bearer grant, pkjwt)")
-    d("Okta", "ok",
-      "Expenses access token obtained (scp: expenses:read expenses:write expenses:delete)")
-    d("Interceptor", "ok",
-      "Authorization: Bearer <expenses-token> injected → forwarding to MCP Server")
+
+    if cached:
+        d("Interceptor", "ok",
+          "Token cache hit — skipping Okta round-trips (warm Lambda, token still valid)")
+        d("Interceptor", "ok",
+          "Authorization: Bearer <expenses-token> injected → forwarding to MCP Server")
+    else:
+        d("Okta", "req",
+          "Stage 2: org ID token → ID-JAG  (org AS, token-exchange grant, pkjwt client_assertion)")
+        d("Okta", "ok",
+          "ID-JAG obtained (act.sub: AI Agent, iss: org AS, expires_in: 300s)")
+        d("Okta", "req",
+          "Stage 3: ID-JAG → expenses access token  (custom AS, jwt-bearer grant, pkjwt)")
+        d("Okta", "ok",
+          "Expenses access token obtained (scp: expenses:read expenses:write expenses:delete)")
+        d("Interceptor", "ok",
+          "Authorization: Bearer <expenses-token> injected → forwarding to MCP Server")
 
 
 @app.entrypoint
@@ -147,7 +158,8 @@ def strands_agent(payload, context):
 
         d("Gateway", "req",
           "Opening MCP session — sending X-ID-Token + X-Agent-ID headers")
-        _xaa_chain(debug, "tools/initialize", t0)
+        # First call: always a full XAA exchange (cold or new user)
+        _xaa_chain(debug, "tools/initialize", t0, cached=False)
 
         with mcp_client:
             tools = mcp_client.list_tools_sync()
@@ -198,7 +210,9 @@ def strands_agent(payload, context):
                 d("Gateway", "req",
                   f"tools/call {name}",
                   {"input": tool_input} if tool_input else None)
-                _xaa_chain(debug, f"tools/call/{name}", t0)
+                # Subsequent calls hit the interceptor's in-memory token cache
+                # (warm Lambda, same user sub, token still valid)
+                _xaa_chain(debug, f"tools/call/{name}", t0, cached=True)
                 d("MCP", "req",
                   f"Forwarding {name} to MCP Server (App Runner → REST API → DynamoDB)")
                 if tr_status == "success":

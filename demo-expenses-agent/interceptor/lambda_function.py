@@ -20,17 +20,21 @@ Secret JSON schema:
     "scope":                "expenses:read expenses:write expenses:delete"
   }
 
-Caching:
-  Secrets are cached in-memory per Lambda execution environment (warm invocations
-  skip the Secrets Manager call). Exchanged access tokens are NOT cached because
-  they are user-scoped and short-lived relative to Lambda warm duration.
+Caching (in-memory, per warm Lambda execution environment):
+  _secret_cache  — Secrets Manager credentials, keyed by agent_id.
+  _token_cache   — Expenses access tokens, keyed by (agent_id, user_sub).
+                   Each entry holds {token, exp} and is evicted when the
+                   token has fewer than TOKEN_CACHE_BUFFER_SECS seconds left.
+                   Typically valid for 1 hour; cold starts re-exchange automatically.
 """
 
 import asyncio
+import base64
 import concurrent.futures
 import json
 import logging
 import os
+import time
 
 import boto3
 
@@ -55,12 +59,53 @@ REGION = os.environ.get("AWS_REGION", "us-east-1")
 _secrets_client = boto3.client("secretsmanager", region_name=REGION)
 _secret_cache: dict[str, dict] = {}
 
+# Access token cache — keyed by (agent_id, user_sub), value: {token, exp}
+_token_cache: dict[tuple, dict] = {}
+TOKEN_CACHE_BUFFER_SECS = 60   # evict tokens expiring within this window
+
 # Scope fallback ladder — mirrors the v1 agent behaviour.
 _SCOPE_LADDER = [
     ["expenses:read", "expenses:write", "expenses:delete"],
     ["expenses:read", "expenses:write"],
     ["expenses:read"],
 ]
+
+
+# ── Token cache helpers ────────────────────────────────────────────────────────
+
+def _jwt_sub(raw_jwt: str) -> str:
+    """Extract the sub claim from a JWT payload without signature verification."""
+    try:
+        payload = raw_jwt.split(".")[1]
+        payload += "=" * (4 - len(payload) % 4)
+        claims = json.loads(base64.urlsafe_b64decode(payload))
+        return claims.get("sub") or claims.get("jti") or raw_jwt[:32]
+    except Exception:
+        return raw_jwt[:32]
+
+
+def _jwt_exp(raw_jwt: str) -> int:
+    """Extract the exp claim from a JWT payload."""
+    try:
+        payload = raw_jwt.split(".")[1]
+        payload += "=" * (4 - len(payload) % 4)
+        return int(json.loads(base64.urlsafe_b64decode(payload)).get("exp", 0))
+    except Exception:
+        return 0
+
+
+def _cached_token(agent_id: str, user_sub: str) -> str | None:
+    entry = _token_cache.get((agent_id, user_sub))
+    if entry and entry["exp"] - TOKEN_CACHE_BUFFER_SECS > time.time():
+        logger.info("Token cache hit for agent=%s sub=%.12s…", agent_id, user_sub)
+        return entry["token"]
+    return None
+
+
+def _cache_token(agent_id: str, user_sub: str, token: str) -> None:
+    exp = _jwt_exp(token)
+    if exp:
+        _token_cache[(agent_id, user_sub)] = {"token": token, "exp": exp}
 
 
 # ── Secrets Manager ────────────────────────────────────────────────────────────
@@ -175,8 +220,16 @@ def lambda_handler(event, context):
         return _build_response(body, auth_header=None)
 
     try:
+        user_sub = _jwt_sub(org_id_token)
+
+        # Check in-memory token cache first (avoids full XAA on warm invocations)
+        cached = _cached_token(agent_id, user_sub)
+        if cached:
+            return _build_response(body, auth_header=f"Bearer {cached}")
+
         secret = _load_secret(agent_id)
         expenses_token = _run_xaa(org_id_token, secret)
+        _cache_token(agent_id, user_sub, expenses_token)
         return _build_response(body, auth_header=f"Bearer {expenses_token}")
     except Exception as e:
         logger.exception("XAA exchange failed: %s", e)
