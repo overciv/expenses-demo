@@ -232,6 +232,7 @@ def strands_agent(payload, context):
                         logger.warning("Strands metrics extraction failed: %s", ex)
 
             # ── Agent invocation with timing ────────────────────────────
+            # callback_handler is a constructor param in Strands, not __call__
             agent = Agent(
                 model=BedrockModel(
                     model_id=MODEL_ID,
@@ -239,11 +240,12 @@ def strands_agent(payload, context):
                 ),
                 tools=tools,
                 system_prompt=SYSTEM_PROMPT,
+                callback_handler=_on_event,
             )
             d("Bedrock", "req",
               f"Invoking {MODEL_ID.split('/')[-1].split(':')[0]} with {len(tools)} tools")
             t_agent_start = time.time()
-            response = agent(prompt, callback_handler=_on_event)
+            response = agent(prompt)
             t_agent_end   = time.time()
             agent_ms = round((t_agent_end - t_agent_start) * 1000)
 
