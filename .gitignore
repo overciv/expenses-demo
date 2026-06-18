@@ -1,0 +1,30 @@
+# Build artifacts
+demo-expenses-agent/.build-deps/
+demo-expenses-agent/.build-deps-hash
+demo-expenses-api/.build/
+demo-expenses-api/mcp_server/.venv/
+
+# Generated at deploy time — contains Okta client ID
+demo-expenses-web/config.js
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+.eggs/
+dist/
+build/
+.venv/
+venv/
+.env
+
+# Docker
+*.tar
+
+# Claude Code internal
+.claude/
+
+# macOS
+.DS_Store

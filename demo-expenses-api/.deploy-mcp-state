@@ -1,0 +1,7 @@
+SERVICE_ARN=arn:aws:apprunner:us-east-1:561425718546:service/expenses-mcp-server/a1cdb23d01b54de39f7d8f80f187992b
+SERVICE_URL=g45wqjhenu.us-east-1.awsapprunner.com
+ECR_URI=561425718546.dkr.ecr.us-east-1.amazonaws.com/expenses-mcp-server
+ECR_REPO=expenses-mcp-server
+ECR_ACCESS_ROLE_NAME=expenses-mcp-apprunner-ecr-role
+REGION=us-east-1
+ACCOUNT_ID=561425718546

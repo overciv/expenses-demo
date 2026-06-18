@@ -1,0 +1,6 @@
+API_ID=7xac9s9ce6
+REGION=us-east-1
+FUNCTION_NAME=expenses-api
+ROLE_NAME=expenses-api-lambda-role
+TABLE_NAME=expenses-demo
+ACCOUNT_ID=561425718546

@@ -1,0 +1,7 @@
+CHAT_API_ID=eun54vw2bl
+CHAT_API_URL=https://eun54vw2bl.execute-api.us-east-1.amazonaws.com/live/chat
+FUNCTION_NAME=expenses-chat-handler
+ROLE_NAME=expenses-chat-lambda-role
+SECRET_ARN=arn:aws:secretsmanager:us-east-1:561425718546:secret:expenses/agent-client-secret-9Wl6c2
+REGION=us-east-1
+ACCOUNT_ID=561425718546

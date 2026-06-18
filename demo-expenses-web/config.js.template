@@ -1,0 +1,16 @@
+window.APP_CONFIG = {
+  okta: {
+    issuer: "__OKTA_ISSUER__",
+    clientId: "__OKTA_CLIENT_ID__",
+    scopes: ["openid", "profile", "email", "expenses:read", "expenses:write", "expenses:delete"],
+    redirectUri: "__REDIRECT_URI__",
+    orgUrl: "__OKTA_ORG_URL__",
+    webappClientId: "__OKTA_WEBAPP_CLIENT_ID__"
+  },
+  api: {
+    baseUrl: "__EXPENSES_API_URL__"
+  },
+  agent: {
+    chatUrl: "__CHAT_API_URL__"
+  }
+};
