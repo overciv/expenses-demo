@@ -232,6 +232,14 @@ def strands_agent(payload, context):
                         logger.warning("Strands metrics extraction failed: %s", ex)
 
             # ── Agent invocation with timing ────────────────────────────
+            agent = Agent(
+                model=BedrockModel(
+                    model_id=MODEL_ID,
+                    region_name=os.environ.get("AWS_REGION", "us-east-1"),
+                ),
+                tools=tools,
+                system_prompt=SYSTEM_PROMPT,
+            )
             d("Bedrock", "req",
               f"Invoking {MODEL_ID.split('/')[-1].split(':')[0]} with {len(tools)} tools")
             t_agent_start = time.time()
