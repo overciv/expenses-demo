@@ -59,6 +59,11 @@ DEMO_EXPENSES = [
 
 
 def lambda_handler(event, context):
+    # EventBridge scheduled warm-up ping — return immediately to keep the
+    # Lambda execution environment alive without touching DynamoDB.
+    if event.get("source") == "aws.events":
+        return {"statusCode": 200, "body": "warm"}
+
     route_key = event.get("routeKey", "")
     # CORS preflight — API Gateway native CORS handles OPTIONS, but this covers
     # edge cases where the request reaches Lambda anyway.

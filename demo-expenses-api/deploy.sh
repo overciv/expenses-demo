@@ -351,6 +351,31 @@ else
 fi
 
 # ─────────────────────────────────────────────
+# Warm-up — EventBridge rule pings Lambda every 5 minutes to prevent cold starts
+# ─────────────────────────────────────────────
+WARMUP_RULE="expenses-api-warmup"
+echo ">>> Warm-up: EventBridge rule ($WARMUP_RULE, rate 5 min)"
+aws events put-rule \
+  --name "$WARMUP_RULE" \
+  --schedule-expression "rate(5 minutes)" \
+  --description "Keep expenses-api Lambda warm to avoid cold-start latency" \
+  --state ENABLED \
+  --region "$REGION" --output text > /dev/null
+WARMUP_RULE_ARN="arn:aws:events:${REGION}:${ACCOUNT_ID}:rule/${WARMUP_RULE}"
+aws events put-targets \
+  --rule "$WARMUP_RULE" \
+  --targets "[{\"Id\":\"expenses-api-warm\",\"Arn\":\"${LAMBDA_ARN}\"}]" \
+  --region "$REGION" --output text > /dev/null
+aws lambda add-permission \
+  --function-name "$FUNCTION_NAME" \
+  --statement-id "allow-eventbridge-warmup" \
+  --action lambda:InvokeFunction \
+  --principal events.amazonaws.com \
+  --source-arn "$WARMUP_RULE_ARN" \
+  --region "$REGION" 2>/dev/null || true
+echo "    Warm-up rule active — Lambda will be pinged every 5 minutes."
+
+# ─────────────────────────────────────────────
 # Summary
 # ─────────────────────────────────────────────
 API_URL="https://${API_ID}.execute-api.${REGION}.amazonaws.com/${STAGE_NAME}"

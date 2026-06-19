@@ -51,6 +51,13 @@ aws dynamodb delete-table --table-name "$_TABLE" --region "$REGION" \
 aws dynamodb wait table-not-exists --table-name "$_TABLE" --region "$REGION"
 echo "    Done."
 
+echo ""
+echo ">>> Deleting EventBridge warm-up rule"
+aws events remove-targets --rule expenses-api-warmup --ids expenses-api-warm \
+  --region "$REGION" 2>/dev/null || true
+aws events delete-rule --name expenses-api-warmup --region "$REGION" 2>/dev/null || true
+echo "    Done."
+
 rm -f "$STATE_FILE"
 rm -rf "$SCRIPT_DIR/.build"
 
