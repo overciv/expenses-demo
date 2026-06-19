@@ -60,7 +60,7 @@ fi
 
 ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
 OKTA_PRIVATE_KEY_ID="${OKTA_PRIVATE_KEY_ID:-expenses-agent-key-1}"
-MODEL_ID="${MODEL_ID:-us.anthropic.claude-3-5-haiku-20241022-v1:0}"
+MODEL_ID="${MODEL_ID:-us.amazon.nova-micro-v1:0}"
 AGENT_ID="expenses-agent"
 
 INTERCEPTOR_FUNCTION_NAME="expenses-xaa-interceptor"
