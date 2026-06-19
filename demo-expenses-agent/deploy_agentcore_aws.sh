@@ -21,7 +21,7 @@
 # Optional:
 #   OKTA_PRIVATE_KEY_ID       — key ID in the Okta JWK set (default: expenses-agent-key-1)
 #   MCP_SERVER_URL            — App Runner MCP URL (auto-read from .deploy-mcp-state if unset)
-#   MODEL_ID                  — Bedrock model ID (default: us.anthropic.claude-3-5-haiku-20241022-v1:0)
+#   MODEL_ID                  — Bedrock model ID (default: us.anthropic.claude-haiku-4-5-20251001-v1:0)
 set -euo pipefail
 
 REGION="${AWS_DEFAULT_REGION:-us-east-1}"
@@ -60,7 +60,7 @@ fi
 
 ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
 OKTA_PRIVATE_KEY_ID="${OKTA_PRIVATE_KEY_ID:-expenses-agent-key-1}"
-MODEL_ID="${MODEL_ID:-us.amazon.nova-micro-v1:0}"
+MODEL_ID="${MODEL_ID:-us.anthropic.claude-haiku-4-5-20251001-v1:0}"
 AGENT_ID="expenses-agent"
 
 INTERCEPTOR_FUNCTION_NAME="expenses-xaa-interceptor"

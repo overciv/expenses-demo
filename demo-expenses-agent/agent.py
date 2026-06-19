@@ -45,7 +45,7 @@ _tool_cache_lock = threading.Lock()
 app = BedrockAgentCoreApp()
 
 GATEWAY_MCP_URL = os.environ["GATEWAY_MCP_URL"]
-MODEL_ID = os.environ.get("MODEL_ID", "us.amazon.nova-micro-v1:0")
+MODEL_ID = os.environ.get("MODEL_ID", "us.anthropic.claude-haiku-4-5-20251001-v1:0")
 AGENT_ID = os.environ.get("AGENT_ID", "expenses-agent")
 
 SYSTEM_PROMPT = """You are an AI expense management assistant for ExpensePro.
