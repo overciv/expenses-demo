@@ -145,6 +145,7 @@ def strands_agent(payload, context):
     Response:
       { "response": "<agent reply>", "debug": [ {source, level, msg, ms}, ... ] }
     """
+    global _tool_cache   # declared once at top — covers the entire function
     prompt = (payload.get("prompt") or "").strip()
     id_token = (payload.get("id_token") or "").strip()
 
@@ -183,7 +184,6 @@ def strands_agent(payload, context):
         _xaa_chain(debug, "tools/initialize", t0, cached=False)
 
         with mcp_client:
-            global _tool_cache
             with _tool_cache_lock:
                 if _tool_cache is not None:
                     # Rebind cached tools to the current MCPClient session
@@ -340,7 +340,6 @@ def strands_agent(payload, context):
         logger.exception("Agent invocation failed")
         d("Runtime", "err", f"Agent error: {e}")
         # Invalidate tool cache on error — tools/list will be re-fetched next time
-        global _tool_cache
         with _tool_cache_lock:
             _tool_cache = None
         return {"error": f"Agent error: {e}", "debug": debug}
