@@ -18,6 +18,8 @@ the full call chain: Runtime → Gateway → Interceptor → Okta XAA → MCP Se
 These events are rendered in the browser Dev Console.
 """
 
+import base64
+import json
 import logging
 import os
 import threading
@@ -34,6 +36,16 @@ from strands.tools.mcp import MCPClient
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+def _decode_jwt_claims(raw_jwt: str) -> dict:
+    """Decode JWT payload without signature verification (claims only)."""
+    try:
+        payload = raw_jwt.split(".")[1]
+        payload += "=" * (4 - len(payload) % 4)
+        return json.loads(base64.urlsafe_b64decode(payload))
+    except Exception:
+        return {}
+
 
 # ── Module-level tool cache ───────────────────────────────────────────────────
 # Populated after the first tools/list call; reused across subsequent prompts
@@ -103,15 +115,19 @@ def _create_mcp_transport(mcp_url: str, token: str, agent_id: str, prompt_nonce:
     return _mcp_transport(mcp_url, token, agent_id, prompt_nonce)
 
 
-def _xaa_chain(debug: list, step_label: str, t0: float, cached: bool = False) -> None:
+def _xaa_chain(debug: list, step_label: str, t0: float,
+               cached: bool = False, id_token_claims: dict | None = None) -> None:
     """Emit the known interceptor → Okta XAA sequence for a given MCP request step.
 
-    cached=True when the token was served from the interceptor's in-memory cache
-    (no Okta round-trips needed — warm Lambda reuse within the ~1h token TTL).
+    cached=True  → token was served from the interceptor's in-memory cache.
+    id_token_claims → decoded claims from the user's org ID token (for JWT expand).
     """
-    def d(source, level, msg):
-        debug.append({"source": source, "level": level, "msg": msg,
-                       "ms": round((time.time() - t0) * 1000)})
+    def d(source, level, msg, data=None):
+        entry: dict = {"source": source, "level": level, "msg": msg,
+                        "ms": round((time.time() - t0) * 1000)}
+        if data is not None:
+            entry["data"] = data
+        debug.append(entry)
 
     d("Interceptor", "req",
       f"XAA exchange fired ({step_label}) — reading X-ID-Token from request headers")
@@ -122,14 +138,57 @@ def _xaa_chain(debug: list, step_label: str, t0: float, cached: bool = False) ->
         d("Interceptor", "ok",
           "Authorization: Bearer <expenses-token> injected → forwarding to MCP Server")
     else:
+        # Include the actual org ID token claims so the browser can expand them
+        org_token_data: dict | None = None
+        if id_token_claims:
+            import datetime
+            exp_ts = id_token_claims.get("exp")
+            org_token_data = {
+                "type": "jwt_claims", "token": "Org ID Token (subject token for XAA)",
+                "iss":  id_token_claims.get("iss", "?"),
+                "sub":  id_token_claims.get("sub", "?"),
+                "aud":  id_token_claims.get("aud", "?"),
+                "cid":  id_token_claims.get("cid") or id_token_claims.get("azp") or "—",
+                "exp":  datetime.datetime.utcfromtimestamp(exp_ts).isoformat() + "Z" if exp_ts else "?",
+            }
+
         d("Okta", "req",
-          "Stage 2: org ID token → ID-JAG  (org AS, token-exchange grant, pkjwt client_assertion)")
+          "Stage 2: org ID token → ID-JAG  (org AS, token-exchange grant, pkjwt client_assertion)",
+          org_token_data)
+
+        id_jag_data: dict | None = None
+        if id_token_claims:
+            id_jag_data = {
+                "type": "jwt_claims", "token": "ID-JAG (Identity-Janus Authentication Grant)",
+                "iss":        id_token_claims.get("iss", "org AS"),
+                "sub":        id_token_claims.get("sub", "?"),
+                "act.sub":    AGENT_ID + "  (AI Agent acting on behalf of user)",
+                "aud":        "Custom AS  (ausdo82jknZLNiOmA0x7)",
+                "expires_in": "300s",
+            }
+
         d("Okta", "ok",
-          "ID-JAG obtained (act.sub: AI Agent, iss: org AS, expires_in: 300s)")
+          "ID-JAG obtained (act.sub: AI Agent, iss: org AS, expires_in: 300s)",
+          id_jag_data)
+
         d("Okta", "req",
           "Stage 3: ID-JAG → expenses access token  (custom AS, jwt-bearer grant, pkjwt)")
+
+        expenses_token_data: dict | None = None
+        if id_token_claims:
+            expenses_token_data = {
+                "type": "jwt_claims", "token": "Expenses Access Token",
+                "iss":    "Custom AS  (ausdo82jknZLNiOmA0x7)",
+                "sub":    id_token_claims.get("sub", "?"),
+                "act.sub": AGENT_ID + "  (AI Agent)",
+                "scp":    "expenses:read  expenses:write  expenses:delete",
+                "aud":    "api://expenses",
+            }
+
         d("Okta", "ok",
-          "Expenses access token obtained (scp: expenses:read expenses:write expenses:delete)")
+          "Expenses access token obtained (scp: expenses:read expenses:write expenses:delete)",
+          expenses_token_data)
+
         d("Interceptor", "ok",
           "Authorization: Bearer <expenses-token> injected → forwarding to MCP Server")
 
@@ -178,10 +237,14 @@ def strands_agent(payload, context):
             lambda: _create_mcp_transport(GATEWAY_MCP_URL, id_token, AGENT_ID, prompt_nonce)
         )
 
+        # Decode org ID token claims once — passed to _xaa_chain for JWT expand buttons
+        id_token_claims = _decode_jwt_claims(id_token)
+
         d("Gateway", "req",
           "Opening MCP session — sending X-ID-Token + X-Agent-ID headers")
         # First call: always a full XAA exchange (cold or new user)
-        _xaa_chain(debug, "tools/initialize", t0, cached=False)
+        _xaa_chain(debug, "tools/initialize", t0, cached=False,
+                   id_token_claims=id_token_claims)
 
         with mcp_client:
             with _tool_cache_lock:
