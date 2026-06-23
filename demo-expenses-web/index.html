@@ -1785,9 +1785,12 @@ async function _handleOrgASCallback() {
     dbg('Browser', 'ok',  `Org ID token obtained — iss: ${cl.iss}, cid: ${cl.cid || cl.aud}`);
     dbg('Browser', 'tok', 'Org ID token decoded claims',
       { type:'jwt_claims', token:'Org ID Token',
-        iss: cl.iss, sub: cl.sub, aud: cl.aud, cid: cl.cid || cl.azp || '—',
-        name: cl.name || cl.preferred_username || '—',
-        exp: new Date(cl.exp * 1000).toISOString() });
+        iss: cl.iss, sub: cl.sub,
+        ...(cl.aud !== undefined ? {aud: cl.aud} : {}),
+        ...(cl.cid !== undefined ? {cid: cl.cid} : cl.azp !== undefined ? {azp: cl.azp} : {}),
+        ...(cl.name !== undefined ? {name: cl.name} : cl.preferred_username !== undefined ? {preferred_username: cl.preferred_username} : {}),
+        ...(cl.iat !== undefined ? {iat: cl.iat} : {}),
+        exp: cl.exp });
   } catch (_) {}
   // Persist across the page reload that happens when chaining to the custom AS
   sessionStorage.setItem('orgIdToken',    _orgIdToken);
@@ -1809,9 +1812,12 @@ async function getOrgIdToken() {
         const cl = JSON.parse(atob(stored.split('.')[1].replace(/-/g,'+').replace(/_/g,'/')));
         dbg('Browser', 'ok', 'Org ID token restored from sessionStorage',
           { type:'jwt_claims', token:'Org ID Token',
-            iss: cl.iss, sub: cl.sub, aud: cl.aud, cid: cl.cid || cl.azp || '—',
-            name: cl.name || cl.preferred_username || '—',
-            exp: new Date(cl.exp * 1000).toISOString() });
+            iss: cl.iss, sub: cl.sub,
+            ...(cl.aud !== undefined ? {aud: cl.aud} : {}),
+            ...(cl.cid !== undefined ? {cid: cl.cid} : cl.azp !== undefined ? {azp: cl.azp} : {}),
+            ...(cl.name !== undefined ? {name: cl.name} : cl.preferred_username !== undefined ? {preferred_username: cl.preferred_username} : {}),
+            ...(cl.iat !== undefined ? {iat: cl.iat} : {}),
+            exp: cl.exp });
       } catch(_) { dbg('Browser', 'ok', 'Org ID token restored from sessionStorage'); }
     }
   }
@@ -1821,8 +1827,11 @@ async function getOrgIdToken() {
       const cl = JSON.parse(atob(_orgIdToken.split('.')[1].replace(/-/g,'+').replace(/_/g,'/')));
       dbg('Browser', 'ok', 'Using cached org ID token',
         { type:'jwt_claims', token:'Org ID Token',
-          iss: cl.iss, sub: cl.sub, aud: cl.aud, cid: cl.cid || cl.azp || '—',
-          exp: new Date(cl.exp * 1000).toISOString() });
+          iss: cl.iss, sub: cl.sub,
+          ...(cl.aud !== undefined ? {aud: cl.aud} : {}),
+          ...(cl.cid !== undefined ? {cid: cl.cid} : cl.azp !== undefined ? {azp: cl.azp} : {}),
+          ...(cl.iat !== undefined ? {iat: cl.iat} : {}),
+          exp: cl.exp });
     } catch(_) { dbg('Browser', 'ok', 'Using cached org ID token'); }
     return _orgIdToken;
   }
