@@ -367,7 +367,9 @@ def strands_agent(payload, context):
             except Exception as ex:
                 logger.warning("Could not extract tool calls from agent history: %s", ex)
 
-            # Emit MCP completion summary (real-time events from callback are more accurate)
+            # Extract real XAA debug claims from tool results and emit as JWT events.
+            # The MCP Server embeds __xaa_debug__ (real expenses token claims) when
+            # the interceptor passes them via X-Debug-Xaa header.
             for tc in tool_calls:
                 name        = tc.get("name", "?")
                 tool_use_id = tc.get("toolUseId", "")
@@ -375,11 +377,24 @@ def strands_agent(payload, context):
                 tr_status   = tr.get("status", "success")
 
                 result_content = tr.get("content") or []
-                result_text = next(
-                    (rc["text"][:120] for rc in result_content
-                     if isinstance(rc, dict) and "text" in rc),
-                    ""
-                )
+                for rc in result_content:
+                    if not isinstance(rc, dict) or "text" not in rc:
+                        continue
+                    try:
+                        data = json.loads(rc["text"])
+                        xaa_debug = data.pop("__xaa_debug__", None)
+                        if xaa_debug:
+                            # Emit REAL expenses token claims (decoded by interceptor)
+                            d("Okta", "tok",
+                              "Expenses access token — actual decoded claims",
+                              {"type": "jwt_claims",
+                               "token": "Expenses Access Token (real)",
+                               **{k: v for k, v in xaa_debug.items()}})
+                            # Update the tool result text with debug stripped
+                            rc["text"] = json.dumps(data)
+                    except Exception:
+                        pass
+
                 if tr_status != "success":
                     d("MCP", "err", f"{name} returned status: {tr_status}")
 

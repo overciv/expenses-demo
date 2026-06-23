@@ -23,7 +23,9 @@ Optional:
   MCP_HOST           Bind host  (default: 0.0.0.0)
 """
 
+import base64
 import contextvars
+import json
 import os
 import sys
 
@@ -58,10 +60,15 @@ _base_url = os.environ.get(
 _bearer_token: contextvars.ContextVar[str] = contextvars.ContextVar(
     "bearer_token", default=""
 )
+# Real expenses-token claims passed from the XAA interceptor via X-Debug-Xaa header.
+# The agent reads __xaa_debug__ out of tool results to show in the Dev Console.
+_xaa_debug: contextvars.ContextVar[dict | None] = contextvars.ContextVar(
+    "xaa_debug", default=None
+)
 
 
 class _BearerExtractMiddleware(BaseHTTPMiddleware):
-    """Extracts the Bearer token from every request into a context variable.
+    """Extracts the Bearer token and XAA debug claims into context variables.
 
     No enforcement here — unauthenticated requests (MCP handshake, tool
     schema discovery) are allowed through.  Tool execution validates the
@@ -72,6 +79,17 @@ class _BearerExtractMiddleware(BaseHTTPMiddleware):
         auth = request.headers.get("Authorization", "")
         token = auth[7:].strip() if auth.upper().startswith("BEARER ") else ""
         _bearer_token.set(token)
+
+        # Decode the interceptor's debug claims (base64-encoded JSON)
+        xaa_raw = request.headers.get("X-Debug-Xaa", "")
+        xaa_claims: dict | None = None
+        if xaa_raw:
+            try:
+                xaa_claims = json.loads(base64.b64decode(xaa_raw))
+            except Exception:
+                pass
+        _xaa_debug.set(xaa_claims)
+
         return await call_next(request)
 
 
@@ -199,6 +217,15 @@ def _check(r: httpx.Response, required_scope: str = "") -> None:
 # Tools
 # ─────────────────────────────────────────────────────────────
 
+def _with_xaa_debug(result: dict) -> dict:
+    """Attach real XAA token claims to the result so the agent can show them
+    in the Dev Console.  The agent strips __xaa_debug__ before displaying."""
+    claims = _xaa_debug.get()
+    if claims:
+        result["__xaa_debug__"] = claims
+    return result
+
+
 @mcp.tool()
 async def list_expenses() -> dict:
     """
@@ -208,7 +235,7 @@ async def list_expenses() -> dict:
     category, submitted_by, date, and status.
     Requires scope: expenses:read
     """
-    return await _get("/expenses")
+    return _with_xaa_debug(await _get("/expenses"))
 
 
 @mcp.tool()
@@ -240,7 +267,7 @@ async def create_expense(
     }
     if date:
         payload["date"] = date
-    return await _post("/expenses", payload)
+    return _with_xaa_debug(await _post("/expenses", payload))
 
 
 @mcp.tool()
@@ -254,7 +281,7 @@ async def delete_expense(expense_id: str) -> dict:
     Note: Built-in demo expenses (exp-001 to exp-004) cannot be deleted.
     Requires scope: expenses:delete
     """
-    return await _delete(f"/expenses/{expense_id}")
+    return _with_xaa_debug(await _delete(f"/expenses/{expense_id}"))
 
 
 # ─────────────────────────────────────────────────────────────

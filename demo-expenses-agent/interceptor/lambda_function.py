@@ -238,7 +238,11 @@ def lambda_handler(event, context):
         secret = _load_secret(agent_id)
         expenses_token = _run_xaa(org_id_token, secret)
         _cache_token(agent_id, user_sub, prompt_nonce, expenses_token)
-        return _build_response(body, auth_header=f"Bearer {expenses_token}")
+        # Decode the real expenses token claims and pass them as a debug header
+        # so the MCP Server can echo them back to the agent for Dev Console display
+        debug_claims = _decode_token_for_debug(expenses_token)
+        return _build_response(body, auth_header=f"Bearer {expenses_token}",
+                               debug_claims=debug_claims)
     except Exception as e:
         logger.exception("XAA exchange failed: %s", e)
         # Return a 403 transformedGatewayResponse so the agent sees a clear error
@@ -259,12 +263,31 @@ def lambda_handler(event, context):
         }
 
 
-def _build_response(body, auth_header: str | None) -> dict:
+def _decode_token_for_debug(raw_jwt: str) -> dict | None:
+    """Decode JWT payload for the X-Debug-Xaa header (no sig verify needed)."""
+    try:
+        payload = raw_jwt.split(".")[1]
+        payload += "=" * (4 - len(payload) % 4)
+        return json.loads(base64.urlsafe_b64decode(payload))
+    except Exception:
+        return None
+
+
+def _build_response(body, auth_header: str | None,
+                    debug_claims: dict | None = None) -> dict:
+    headers: dict = {}
+    if auth_header:
+        headers["Authorization"] = auth_header
+    if debug_claims:
+        # Base64-encode the claims dict so it survives as an HTTP header value
+        headers["X-Debug-Xaa"] = base64.b64encode(
+            json.dumps(debug_claims).encode()
+        ).decode()
     return {
         "interceptorOutputVersion": "1.0",
         "mcp": {
             "transformedGatewayRequest": {
-                "headers": {"Authorization": auth_header} if auth_header else {},
+                "headers": headers,
                 "body": body,
             }
         },

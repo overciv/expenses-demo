@@ -27,13 +27,26 @@
     .src-interceptor { color:#fbbf24; }
     .src-okta        { color:#a78bfa; }
     .src-mcp         { color:#4ade80; }
-    /* JWT claims block inside payload panel */
-    .jwt-block { border-left:2px solid #7c3aed; padding:4px 0 4px 8px; margin:2px 0; }
-    .jwt-label { color:#a78bfa; font-weight:700; font-size:10px; letter-spacing:.05em; display:block; margin-bottom:2px; }
-    .jwt-row { display:flex; gap:6px; line-height:1.5; }
-    .jwt-key { color:#7dd3fc; min-width:70px; flex-shrink:0; }
-    .jwt-colon { color:#475569; }
-    .jwt-val { color:#d8b4fe; word-break:break-all; }
+    /* JWT annotated claims block */
+    .jwt-block  { border-left:2px solid #7c3aed; padding:4px 0 4px 10px; margin:2px 0; font-size:10.5px; }
+    .jwt-label  { color:#a78bfa; font-weight:700; font-size:10px; letter-spacing:.08em; display:block; margin-bottom:4px; }
+    .jwt-row    { display:flex; gap:0; line-height:1.7; flex-wrap:wrap; align-items:baseline; }
+    .jwt-key    { color:#7dd3fc; min-width:90px; flex-shrink:0; }
+    .jwt-colon  { color:#475569; margin-right:6px; }
+    /* Value colors by claim category */
+    .jwt-iss    { color:#2dd4bf; }   /* issuer — teal */
+    .jwt-sub    { color:#fbbf24; }   /* subject (user) — amber */
+    .jwt-act    { color:#f87171; }   /* actor / delegation — rose  ← key XAA claim */
+    .jwt-scp    { color:#4ade80; }   /* scopes — green */
+    .jwt-cid    { color:#60a5fa; }   /* client id — blue */
+    .jwt-aud    { color:#a78bfa; }   /* audience — violet */
+    .jwt-time   { color:#fb923c; }   /* timestamps — orange */
+    .jwt-str    { color:#e2e8f0; }   /* generic string — light */
+    .jwt-num    { color:#94a3b8; }   /* number — muted */
+    .jwt-obj    { color:#f0abfc; }   /* nested object — purple */
+    .jwt-scope-pill { background:#14532d; color:#4ade80; border-radius:3px; padding:0 4px; margin:0 2px; font-size:9.5px; }
+    .jwt-ts-human { color:#64748b; font-style:italic; }  /* "(2026-06-22 UTC)" */
+    .jwt-comment{ color:#334155; font-style:italic; margin-left:8px; font-size:9.5px; }
     .lvl-ok  .ce-msg { color:#4ade80; }
     .lvl-err .ce-msg { color:#f87171; }
     .lvl-tok .ce-msg { color:#fbbf24; }
@@ -1566,6 +1579,83 @@ function clearConsole() {
   document.getElementById('console-entries').innerHTML = '';
 }
 
+// ── JWT annotated renderer ────────────────────────────────────────────────────
+const _JWT_COMMENTS = {
+  iss:   'Issuer — Authorization Server that created and signed this token',
+  sub:   'Subject — the authenticated user\'s unique ID (preserved through every XAA hop)',
+  aud:   'Audience — the intended recipient(s) of this token',
+  exp:   'Expiry — token becomes invalid after this Unix timestamp',
+  iat:   'Issued At — when this token was minted',
+  nbf:   'Not Before — token is invalid before this Unix timestamp',
+  jti:   'JWT ID — unique identifier, prevents replay attacks',
+  cid:   'Client ID — the OAuth application that requested this token',
+  azp:   'Authorized Party — the OAuth client that received this token',
+  act:   'Actor — entity acting ON BEHALF OF the subject  ← Okta XAA delegation claim',
+  scp:   'Scopes — API permissions delegated to the token holder',
+  scope: 'Scope — space-separated API permissions',
+  ver:   'Token version',
+  uid:   'Okta internal user ID',
+  auth_time: 'Authentication Time — when the user last authenticated (Unix ts)',
+  name:  'User display name from Okta profile',
+  email: 'Email address from Okta profile',
+  preferred_username: 'Preferred username / login identifier',
+  'expires_in': 'TTL in seconds (ID-JAG has a 300 s / 5 min lifetime)',
+};
+
+function _jwtValClass(key) {
+  if (key === 'iss')                          return 'jwt-iss';
+  if (key === 'sub')                          return 'jwt-sub';
+  if (key === 'act' || key.startsWith('act.')) return 'jwt-act';
+  if (key === 'scp' || key === 'scope')       return 'jwt-scp';
+  if (key === 'cid' || key === 'azp')         return 'jwt-cid';
+  if (key === 'aud')                          return 'jwt-aud';
+  if (['exp','iat','nbf','auth_time'].includes(key)) return 'jwt-time';
+  return 'jwt-str';
+}
+
+function _jwtFormatVal(key, val) {
+  // Unix timestamps → human-readable
+  if (['exp','iat','nbf','auth_time'].includes(key) && typeof val === 'number') {
+    const iso = new Date(val * 1000).toISOString().replace('T',' ').replace('.000Z',' UTC');
+    return `<span class="jwt-time">${val}</span> <span class="jwt-ts-human">(${iso})</span>`;
+  }
+  // Scopes array → colored pills
+  if (key === 'scp' && Array.isArray(val)) {
+    return val.map(s => `<span class="jwt-scope-pill">${esc(s)}</span>`).join(' ');
+  }
+  // Scope string → pills
+  if (key === 'scope' && typeof val === 'string') {
+    return val.split(' ').map(s => `<span class="jwt-scope-pill">${esc(s)}</span>`).join(' ');
+  }
+  // Nested object (e.g. act: { sub: "..." })
+  if (typeof val === 'object' && val !== null && !Array.isArray(val)) {
+    const inner = Object.entries(val)
+      .map(([k,v]) => `<span class="jwt-cid">${esc(k)}</span>: <span class="jwt-act">"${esc(String(v))}"</span>`)
+      .join(', ');
+    return `<span class="jwt-obj">{ ${inner} }</span>`;
+  }
+  const cls = _jwtValClass(key);
+  const str = typeof val === 'string' ? `"${esc(val)}"` : esc(String(val));
+  return `<span class="${cls}">${str}</span>`;
+}
+
+function _renderJWT(payload) {
+  const SKIP = new Set(['type', 'token']);
+  const label = payload.token || 'JWT Claims';
+  let html = `<div class="jwt-block"><span class="jwt-label">⟨ ${esc(label)} ⟩</span>`;
+  for (const [k, v] of Object.entries(payload)) {
+    if (SKIP.has(k)) continue;
+    const comment = _JWT_COMMENTS[k] || '';
+    html += `<div class="jwt-row">` +
+      `<span class="jwt-key">${esc(k)}</span>` +
+      `<span class="jwt-colon">: </span>` +
+      _jwtFormatVal(k, v) +
+      (comment ? `<span class="jwt-comment">// ${esc(comment)}</span>` : '') +
+      `</div>`;
+  }
+  return html + '</div>';
+}
+
 let _entryCounter = 0;
 function dbg(source, level, msg, payload) {
   const c = document.getElementById('console-entries');
@@ -1603,16 +1693,7 @@ function dbg(source, level, msg, payload) {
     pay.dataset.important = important ? '1' : '0';
     pay.style.display = visible ? '' : 'none';
     if (isJWT) {
-      // Render JWT claims as a styled key-value block
-      const SKIP = new Set(['type', 'token']);
-      let html = `<div class="jwt-block"><span class="jwt-label">⟨ ${esc(payload.token || 'JWT Claims')} ⟩</span>`;
-      for (const [k, v] of Object.entries(payload)) {
-        if (SKIP.has(k)) continue;
-        const vStr = typeof v === 'object' ? JSON.stringify(v) : String(v);
-        html += `<div class="jwt-row"><span class="jwt-key">${esc(k)}</span><span class="jwt-colon">:</span><span class="jwt-val">${esc(vStr)}</span></div>`;
-      }
-      html += '</div>';
-      pay.innerHTML = html;
+      pay.innerHTML = _renderJWT(payload);
     } else {
       pay.textContent = typeof payload === 'string' ? payload : JSON.stringify(payload, null, 2);
     }
