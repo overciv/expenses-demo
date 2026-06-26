@@ -99,19 +99,29 @@ def _jwt_exp(raw_jwt: str) -> int:
         return 0
 
 
-def _cached_token(agent_id: str, user_sub: str, prompt_nonce: str) -> str | None:
+def _cached_token(
+    agent_id: str, user_sub: str, prompt_nonce: str
+) -> tuple[str | None, dict | None]:
+    """Return (token, debug_claims) or (None, None) if not cached / expired."""
     entry = _token_cache.get((agent_id, user_sub, prompt_nonce))
     if entry and entry["exp"] - TOKEN_CACHE_BUFFER_SECS > time.time():
         logger.info("Token cache hit for agent=%s sub=%.12s… nonce=%.8s…",
                     agent_id, user_sub, prompt_nonce)
-        return entry["token"]
-    return None
+        return entry["token"], entry.get("debug_claims")
+    return None, None
 
 
-def _cache_token(agent_id: str, user_sub: str, prompt_nonce: str, token: str) -> None:
+def _cache_token(
+    agent_id: str, user_sub: str, prompt_nonce: str,
+    token: str, debug_claims: dict | None = None
+) -> None:
     exp = _jwt_exp(token)
     if exp:
-        _token_cache[(agent_id, user_sub, prompt_nonce)] = {"token": token, "exp": exp}
+        _token_cache[(agent_id, user_sub, prompt_nonce)] = {
+            "token": token,
+            "exp": exp,
+            "debug_claims": debug_claims,   # stored so cache hits can also send X-Debug-Xaa
+        }
 
 
 # ── Secrets Manager ────────────────────────────────────────────────────────────
@@ -257,21 +267,22 @@ def lambda_handler(event, context):
     try:
         user_sub = _jwt_sub(org_id_token)
 
-        # Cache hit: same prompt (same nonce) → reuse token, skip XAA
-        cached = _cached_token(agent_id, user_sub, prompt_nonce)
-        if cached:
-            return _build_response(body, auth_header=f"Bearer {cached}")
+        # Cache hit: same prompt (same nonce) → reuse token and cached debug claims
+        cached_token, cached_debug = _cached_token(agent_id, user_sub, prompt_nonce)
+        if cached_token:
+            # Pass the stored debug claims so every tool/call also gets X-Debug-Xaa
+            return _build_response(body, auth_header=f"Bearer {cached_token}",
+                                   debug_claims=cached_debug)
 
         # Cache miss: new prompt (new nonce) or first call → full XAA exchange
         secret = _load_secret(agent_id)
         expenses_token, id_jag_jwt = _run_xaa(org_id_token, secret)
-        _cache_token(agent_id, user_sub, prompt_nonce, expenses_token)
-        # Decode both real tokens and pass in the debug header so the MCP Server
-        # echoes them back to the agent for Dev Console display
+        # Decode both real tokens and store in cache so hits can replay them
         debug_claims = {
             "expenses": _decode_token_for_debug(expenses_token),
             "id_jag":   _decode_token_for_debug(id_jag_jwt) if id_jag_jwt else None,
         }
+        _cache_token(agent_id, user_sub, prompt_nonce, expenses_token, debug_claims)
         return _build_response(body, auth_header=f"Bearer {expenses_token}",
                                debug_claims=debug_claims)
     except Exception as e:
