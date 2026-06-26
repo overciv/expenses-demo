@@ -385,12 +385,22 @@ def strands_agent(payload, context):
                         data = json.loads(rc["text"])
                         xaa_debug = data.pop("__xaa_debug__", None)
                         if xaa_debug:
-                            # Emit REAL expenses token — exact decoded payload from interceptor
-                            d("Okta", "tok",
-                              "Expenses access token — actual decoded payload",
-                              {"type":   "jwt_raw",
-                               "token":  "Expenses Access Token  ✓ real decoded payload",
-                               "claims": xaa_debug})
+                            # Emit REAL ID-JAG (Stage 2 result) — exact payload from interceptor
+                            id_jag_claims = xaa_debug.get("id_jag")
+                            if id_jag_claims:
+                                d("Okta", "tok",
+                                  "ID-JAG — actual decoded payload",
+                                  {"type":   "jwt_raw",
+                                   "token":  "ID-JAG  ✓ real decoded payload",
+                                   "claims": id_jag_claims})
+                            # Emit REAL expenses token (Stage 3 result)
+                            expenses_claims = xaa_debug.get("expenses")
+                            if expenses_claims:
+                                d("Okta", "tok",
+                                  "Expenses access token — actual decoded payload",
+                                  {"type":   "jwt_raw",
+                                   "token":  "Expenses Access Token  ✓ real decoded payload",
+                                   "claims": expenses_claims})
                             # Update the tool result text with debug stripped
                             rc["text"] = json.dumps(data)
                     except Exception:

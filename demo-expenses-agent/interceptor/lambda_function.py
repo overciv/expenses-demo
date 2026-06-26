@@ -47,6 +47,7 @@ from okta_client.authfoundation.oauth2.client_authorization import ClientAsserti
 from okta_client.authfoundation.oauth2.jwt_bearer_claims import JWTBearerClaims
 from okta_client.oauth2auth import (
     CrossAppAccessFlow,
+    CrossAppAccessFlowListener,
     CrossAppAccessTarget,
 )
 
@@ -128,7 +129,28 @@ def _load_secret(agent_id: str) -> dict:
 
 # ── Okta XAA exchange ──────────────────────────────────────────────────────────
 
-async def _exchange_with_scope_fallback(org_id_token: str, secret: dict) -> str:
+class _IDJAGCapture(CrossAppAccessFlowListener):
+    """Listener that captures the raw ID-JAG JWT during the XAA flow."""
+
+    def __init__(self):
+        self.id_jag_jwt: str | None = None
+
+    def did_exchange_token_for_id_jag(self, flow, id_jag_token):
+        self.id_jag_jwt = getattr(id_jag_token, "access_token", None)
+
+    # Required interface stubs
+    def will_exchange_token_for_id_jag(self, *a): pass
+    def will_exchange_id_jag_for_access_token(self, *a): pass
+    def did_exchange_id_jag_for_access_token(self, *a): pass
+    def authentication_started(self, *a): pass
+    def authentication_finished(self, *a): pass
+    def authentication_failed(self, *a): pass
+
+
+async def _exchange_with_scope_fallback(
+    org_id_token: str, secret: dict
+) -> tuple[str, str | None]:
+    """Returns (expenses_access_token, id_jag_jwt_or_None)."""
     last_exc = None
     for i, scopes in enumerate(_SCOPE_LADDER):
         try:
@@ -151,7 +173,10 @@ async def _exchange_with_scope_fallback(org_id_token: str, secret: dict) -> str:
     raise last_exc  # type: ignore[misc]
 
 
-async def _exchange(org_id_token: str, scopes: list[str], secret: dict) -> str:
+async def _exchange(
+    org_id_token: str, scopes: list[str], secret: dict
+) -> tuple[str, str | None]:
+    """Returns (expenses_access_token, id_jag_jwt_or_None)."""
     okta_org_url = secret["okta_org_url"].rstrip("/")
     okta_issuer = secret["okta_issuer"].rstrip("/")
     agent_client_id = secret["okta_agent_client_id"]
@@ -179,7 +204,10 @@ async def _exchange(org_id_token: str, scopes: list[str], secret: dict) -> str:
     )
     client = OAuth2Client(configuration=config)
     target = CrossAppAccessTarget(issuer=okta_issuer)
+
+    id_jag_capture = _IDJAGCapture()
     flow = CrossAppAccessFlow(client=client, target=target)
+    flow.listeners.add(id_jag_capture)
 
     logger.info(
         "XAA Stage 2: org ID token → ID-JAG  (org AS: %s)", org_token_endpoint
@@ -194,10 +222,10 @@ async def _exchange(org_id_token: str, scopes: list[str], secret: dict) -> str:
     logger.info("XAA Stage 3: ID-JAG → expenses access token  (custom AS: %s/v1/token)", okta_issuer)
     access_token = await flow.resume()
     logger.info("XAA exchange succeeded — scopes: %s", " ".join(scopes))
-    return access_token.access_token
+    return access_token.access_token, id_jag_capture.id_jag_jwt
 
 
-def _run_xaa(org_id_token: str, secret: dict) -> str:
+def _run_xaa(org_id_token: str, secret: dict) -> tuple[str, str | None]:
     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
         return pool.submit(
             asyncio.run, _exchange_with_scope_fallback(org_id_token, secret)
@@ -236,11 +264,14 @@ def lambda_handler(event, context):
 
         # Cache miss: new prompt (new nonce) or first call → full XAA exchange
         secret = _load_secret(agent_id)
-        expenses_token = _run_xaa(org_id_token, secret)
+        expenses_token, id_jag_jwt = _run_xaa(org_id_token, secret)
         _cache_token(agent_id, user_sub, prompt_nonce, expenses_token)
-        # Decode the real expenses token claims and pass them as a debug header
-        # so the MCP Server can echo them back to the agent for Dev Console display
-        debug_claims = _decode_token_for_debug(expenses_token)
+        # Decode both real tokens and pass in the debug header so the MCP Server
+        # echoes them back to the agent for Dev Console display
+        debug_claims = {
+            "expenses": _decode_token_for_debug(expenses_token),
+            "id_jag":   _decode_token_for_debug(id_jag_jwt) if id_jag_jwt else None,
+        }
         return _build_response(body, auth_header=f"Bearer {expenses_token}",
                                debug_claims=debug_claims)
     except Exception as e:
