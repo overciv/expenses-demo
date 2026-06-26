@@ -27,26 +27,17 @@
     .src-interceptor { color:#fbbf24; }
     .src-okta        { color:#a78bfa; }
     .src-mcp         { color:#4ade80; }
-    /* JWT annotated claims block */
-    .jwt-block  { border-left:2px solid #7c3aed; padding:4px 0 4px 10px; margin:2px 0; font-size:10.5px; }
+    /* JWT raw JSON dump block */
+    .jwt-block  { border-left:2px solid #7c3aed; padding:4px 0 4px 10px; margin:2px 0; }
     .jwt-label  { color:#a78bfa; font-weight:700; font-size:10px; letter-spacing:.08em; display:block; margin-bottom:4px; }
-    .jwt-row    { display:flex; gap:0; line-height:1.7; flex-wrap:wrap; align-items:baseline; }
-    .jwt-key    { color:#7dd3fc; min-width:90px; flex-shrink:0; }
-    .jwt-colon  { color:#475569; margin-right:6px; }
-    /* Value colors by claim category */
-    .jwt-iss    { color:#2dd4bf; }   /* issuer — teal */
-    .jwt-sub    { color:#fbbf24; }   /* subject (user) — amber */
-    .jwt-act    { color:#f87171; }   /* actor / delegation — rose  ← key XAA claim */
-    .jwt-scp    { color:#4ade80; }   /* scopes — green */
-    .jwt-cid    { color:#60a5fa; }   /* client id — blue */
-    .jwt-aud    { color:#a78bfa; }   /* audience — violet */
-    .jwt-time   { color:#fb923c; }   /* timestamps — orange */
-    .jwt-str    { color:#e2e8f0; }   /* generic string — light */
-    .jwt-num    { color:#94a3b8; }   /* number — muted */
-    .jwt-obj    { color:#f0abfc; }   /* nested object — purple */
-    .jwt-scope-pill { background:#14532d; color:#4ade80; border-radius:3px; padding:0 4px; margin:0 2px; font-size:9.5px; }
-    .jwt-ts-human { color:#64748b; font-style:italic; }  /* "(2026-06-22 UTC)" */
-    .jwt-comment{ color:#334155; font-style:italic; margin-left:8px; font-size:9.5px; }
+    .jwt-pre    { white-space:pre; font-family:'JetBrains Mono','Fira Code','Courier New',monospace; font-size:10.5px; line-height:1.6; }
+    /* JSON syntax colors */
+    .jk  { color:#7dd3fc; }   /* key */
+    .js  { color:#a5f3fc; }   /* string value */
+    .jn  { color:#fb923c; }   /* number */
+    .jb  { color:#f472b6; }   /* boolean */
+    .jl  { color:#94a3b8; }   /* null */
+    .jp  { color:#475569; }   /* punctuation */
     .lvl-ok  .ce-msg { color:#4ade80; }
     .lvl-err .ce-msg { color:#f87171; }
     .lvl-tok .ce-msg { color:#fbbf24; }
@@ -1579,81 +1570,30 @@ function clearConsole() {
   document.getElementById('console-entries').innerHTML = '';
 }
 
-// ── JWT annotated renderer ────────────────────────────────────────────────────
-const _JWT_COMMENTS = {
-  iss:   'Issuer — Authorization Server that created and signed this token',
-  sub:   'Subject — the authenticated user\'s unique ID (preserved through every XAA hop)',
-  aud:   'Audience — the intended recipient(s) of this token',
-  exp:   'Expiry — token becomes invalid after this Unix timestamp',
-  iat:   'Issued At — when this token was minted',
-  nbf:   'Not Before — token is invalid before this Unix timestamp',
-  jti:   'JWT ID — unique identifier, prevents replay attacks',
-  cid:   'Client ID — the OAuth application that requested this token',
-  azp:   'Authorized Party — the OAuth client that received this token',
-  act:   'Actor — entity acting ON BEHALF OF the subject  ← Okta XAA delegation claim',
-  scp:   'Scopes — API permissions delegated to the token holder',
-  scope: 'Scope — space-separated API permissions',
-  ver:   'Token version',
-  uid:   'Okta internal user ID',
-  auth_time: 'Authentication Time — when the user last authenticated (Unix ts)',
-  name:  'User display name from Okta profile',
-  email: 'Email address from Okta profile',
-  preferred_username: 'Preferred username / login identifier',
-  'expires_in': 'TTL in seconds (ID-JAG has a 300 s / 5 min lifetime)',
-};
-
-function _jwtValClass(key) {
-  if (key === 'iss')                          return 'jwt-iss';
-  if (key === 'sub')                          return 'jwt-sub';
-  if (key === 'act' || key.startsWith('act.')) return 'jwt-act';
-  if (key === 'scp' || key === 'scope')       return 'jwt-scp';
-  if (key === 'cid' || key === 'azp')         return 'jwt-cid';
-  if (key === 'aud')                          return 'jwt-aud';
-  if (['exp','iat','nbf','auth_time'].includes(key)) return 'jwt-time';
-  return 'jwt-str';
-}
-
-function _jwtFormatVal(key, val) {
-  // Unix timestamps → human-readable
-  if (['exp','iat','nbf','auth_time'].includes(key) && typeof val === 'number') {
-    const iso = new Date(val * 1000).toISOString().replace('T',' ').replace('.000Z',' UTC');
-    return `<span class="jwt-time">${val}</span> <span class="jwt-ts-human">(${iso})</span>`;
-  }
-  // Scopes array → colored pills
-  if (key === 'scp' && Array.isArray(val)) {
-    return val.map(s => `<span class="jwt-scope-pill">${esc(s)}</span>`).join(' ');
-  }
-  // Scope string → pills
-  if (key === 'scope' && typeof val === 'string') {
-    return val.split(' ').map(s => `<span class="jwt-scope-pill">${esc(s)}</span>`).join(' ');
-  }
-  // Nested object (e.g. act: { sub: "..." })
-  if (typeof val === 'object' && val !== null && !Array.isArray(val)) {
-    const inner = Object.entries(val)
-      .map(([k,v]) => `<span class="jwt-cid">${esc(k)}</span>: <span class="jwt-act">"${esc(String(v))}"</span>`)
-      .join(', ');
-    return `<span class="jwt-obj">{ ${inner} }</span>`;
-  }
-  const cls = _jwtValClass(key);
-  const str = typeof val === 'string' ? `"${esc(val)}"` : esc(String(val));
-  return `<span class="${cls}">${str}</span>`;
+// ── JWT raw JSON renderer ─────────────────────────────────────────────────────
+function _highlightJSON(obj) {
+  // Pretty-print then apply syntax coloring
+  const raw = JSON.stringify(obj, null, 2);
+  return raw
+    // keys
+    .replace(/"([^"]+)"(\s*:)/g, '<span class="jk">"$1"</span><span class="jp">$2</span>')
+    // string values
+    .replace(/:\s*"([^"]*)"/g, (m, v) => `: <span class="js">"${esc(v)}"</span>`)
+    // numbers
+    .replace(/:\s*(-?\d+\.?\d*)/g, ': <span class="jn">$1</span>')
+    // booleans
+    .replace(/:\s*(true|false)/g, ': <span class="jb">$1</span>')
+    // null
+    .replace(/:\s*(null)/g, ': <span class="jl">$1</span>');
 }
 
 function _renderJWT(payload) {
-  const SKIP = new Set(['type', 'token']);
-  const label = payload.token || 'JWT Claims';
-  let html = `<div class="jwt-block"><span class="jwt-label">⟨ ${esc(label)} ⟩</span>`;
-  for (const [k, v] of Object.entries(payload)) {
-    if (SKIP.has(k)) continue;
-    const comment = _JWT_COMMENTS[k] || '';
-    html += `<div class="jwt-row">` +
-      `<span class="jwt-key">${esc(k)}</span>` +
-      `<span class="jwt-colon">: </span>` +
-      _jwtFormatVal(k, v) +
-      (comment ? `<span class="jwt-comment">// ${esc(comment)}</span>` : '') +
-      `</div>`;
-  }
-  return html + '</div>';
+  const label = payload.token || 'JWT';
+  const claims = payload.claims || {};
+  return `<div class="jwt-block">` +
+    `<span class="jwt-label">⟨ ${esc(label)} ⟩</span>` +
+    `<div class="jwt-pre">${_highlightJSON(claims)}</div>` +
+    `</div>`;
 }
 
 let _entryCounter = 0;
@@ -1675,7 +1615,8 @@ function dbg(source, level, msg, payload) {
   const lvlClass = level === 'ok' ? 'lvl-ok' : level === 'err' ? 'lvl-err' :
                    level === 'tok' ? 'lvl-tok' : level === 'req' ? 'lvl-req' : '';
   const hasPayload = payload !== undefined && payload !== null;
-  const isJWT = hasPayload && payload && payload.type === 'jwt_claims';
+  const isJWT = hasPayload && payload &&
+    (payload.type === 'jwt_raw' || payload.type === 'jwt_claims');
 
   // JWT expand label shows token type; other payloads show generic "expand"
   const expandLabel = isJWT ? `🔑 ${esc(payload.token || 'JWT')}` : '▶ expand';
@@ -1784,13 +1725,7 @@ async function _handleOrgASCallback() {
     _orgIdTokenExp = cl.exp || 0;
     dbg('Browser', 'ok',  `Org ID token obtained — iss: ${cl.iss}, cid: ${cl.cid || cl.aud}`);
     dbg('Browser', 'tok', 'Org ID token decoded claims',
-      { type:'jwt_claims', token:'Org ID Token',
-        iss: cl.iss, sub: cl.sub,
-        ...(cl.aud !== undefined ? {aud: cl.aud} : {}),
-        ...(cl.cid !== undefined ? {cid: cl.cid} : cl.azp !== undefined ? {azp: cl.azp} : {}),
-        ...(cl.name !== undefined ? {name: cl.name} : cl.preferred_username !== undefined ? {preferred_username: cl.preferred_username} : {}),
-        ...(cl.iat !== undefined ? {iat: cl.iat} : {}),
-        exp: cl.exp });
+      { type: 'jwt_raw', token: 'Org ID Token', claims: cl });
   } catch (_) {}
   // Persist across the page reload that happens when chaining to the custom AS
   sessionStorage.setItem('orgIdToken',    _orgIdToken);
@@ -1811,13 +1746,7 @@ async function getOrgIdToken() {
       try {
         const cl = JSON.parse(atob(stored.split('.')[1].replace(/-/g,'+').replace(/_/g,'/')));
         dbg('Browser', 'ok', 'Org ID token restored from sessionStorage',
-          { type:'jwt_claims', token:'Org ID Token',
-            iss: cl.iss, sub: cl.sub,
-            ...(cl.aud !== undefined ? {aud: cl.aud} : {}),
-            ...(cl.cid !== undefined ? {cid: cl.cid} : cl.azp !== undefined ? {azp: cl.azp} : {}),
-            ...(cl.name !== undefined ? {name: cl.name} : cl.preferred_username !== undefined ? {preferred_username: cl.preferred_username} : {}),
-            ...(cl.iat !== undefined ? {iat: cl.iat} : {}),
-            exp: cl.exp });
+          { type: 'jwt_raw', token: 'Org ID Token', claims: cl });
       } catch(_) { dbg('Browser', 'ok', 'Org ID token restored from sessionStorage'); }
     }
   }
@@ -1826,12 +1755,7 @@ async function getOrgIdToken() {
     try {
       const cl = JSON.parse(atob(_orgIdToken.split('.')[1].replace(/-/g,'+').replace(/_/g,'/')));
       dbg('Browser', 'ok', 'Using cached org ID token',
-        { type:'jwt_claims', token:'Org ID Token',
-          iss: cl.iss, sub: cl.sub,
-          ...(cl.aud !== undefined ? {aud: cl.aud} : {}),
-          ...(cl.cid !== undefined ? {cid: cl.cid} : cl.azp !== undefined ? {azp: cl.azp} : {}),
-          ...(cl.iat !== undefined ? {iat: cl.iat} : {}),
-          exp: cl.exp });
+        { type: 'jwt_raw', token: 'Org ID Token', claims: cl });
     } catch(_) { dbg('Browser', 'ok', 'Using cached org ID token'); }
     return _orgIdToken;
   }

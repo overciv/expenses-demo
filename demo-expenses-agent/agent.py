@@ -138,34 +138,30 @@ def _xaa_chain(debug: list, step_label: str, t0: float,
         d("Interceptor", "ok",
           "Authorization: Bearer <expenses-token> injected → forwarding to MCP Server")
     else:
-        # Include the actual org ID token claims so the browser can expand them
+        # Pass the actual full decoded org ID token claims (raw, nothing added)
         org_token_data: dict | None = None
         if id_token_claims:
-            import datetime
-            exp_ts = id_token_claims.get("exp")
             org_token_data = {
-                "type": "jwt_claims", "token": "Org ID Token (subject token for XAA)",
-                "iss":  id_token_claims.get("iss", "?"),
-                "sub":  id_token_claims.get("sub", "?"),
-                "aud":  id_token_claims.get("aud", "?"),
-                "cid":  id_token_claims.get("cid") or id_token_claims.get("azp") or "—",
-                "exp":  datetime.datetime.utcfromtimestamp(exp_ts).isoformat() + "Z" if exp_ts else "?",
+                "type":   "jwt_raw",
+                "token":  "Org ID Token (subject token for Stage 2)",
+                "claims": id_token_claims,
             }
 
         d("Okta", "req",
           "Stage 2: org ID token → ID-JAG  (org AS, token-exchange grant, pkjwt client_assertion)",
           org_token_data)
 
-        # ID-JAG claims — derived from known XAA protocol (interceptor holds the actual token)
+        # ID-JAG: derived — interceptor holds actual token; reconstruct known claims
         id_jag_data: dict | None = None
         if id_token_claims:
             id_jag_data = {
-                "type":  "jwt_claims",
-                "token": "ID-JAG  ⚠ derived — interceptor holds actual token",
-                "iss":   id_token_claims.get("iss"),   # org AS issuer (same as org token)
-                "sub":   id_token_claims.get("sub"),   # user ID preserved from org token
-                "act":   {"sub": AGENT_ID},             # actual nested claim structure
-                "exp":   "(~300s from exchange)",
+                "type":   "jwt_raw",
+                "token":  "ID-JAG  ⚠ derived — interceptor holds actual token",
+                "claims": {
+                    "iss": id_token_claims.get("iss"),
+                    "sub": id_token_claims.get("sub"),
+                    "act": {"sub": AGENT_ID},
+                },
             }
 
         d("Okta", "ok",
@@ -175,18 +171,19 @@ def _xaa_chain(debug: list, step_label: str, t0: float,
         d("Okta", "req",
           "Stage 3: ID-JAG → expenses access token  (custom AS, jwt-bearer grant, pkjwt)")
 
-        # Expenses token — derived preview; actual decoded claims emitted separately
-        # by the agent after the tool call via the __xaa_debug__ pipeline
+        # Expenses token: derived preview only — actual decoded claims arrive below
+        # after the tool call via the __xaa_debug__ pipeline (real values from interceptor)
         expenses_token_data: dict | None = None
         if id_token_claims:
             expenses_token_data = {
-                "type":  "jwt_claims",
-                "token": "Expenses Access Token  ⚠ derived — see actual token below",
-                "iss":   "(custom AS issuer — available in actual token below)",
-                "sub":   id_token_claims.get("sub"),   # preserved from org token
-                "act":   {"sub": AGENT_ID},             # actual nested claim structure
-                "scp":   ["expenses:read", "expenses:write", "expenses:delete"],
-                "aud":   "api://expenses",
+                "type":   "jwt_raw",
+                "token":  "Expenses Access Token  ⚠ derived — see actual token below",
+                "claims": {
+                    "sub": id_token_claims.get("sub"),
+                    "act": {"sub": AGENT_ID},
+                    "scp": ["expenses:read", "expenses:write", "expenses:delete"],
+                    "aud": "api://expenses",
+                },
             }
 
         d("Okta", "ok",
@@ -388,12 +385,12 @@ def strands_agent(payload, context):
                         data = json.loads(rc["text"])
                         xaa_debug = data.pop("__xaa_debug__", None)
                         if xaa_debug:
-                            # Emit REAL expenses token claims (decoded by interceptor)
+                            # Emit REAL expenses token — exact decoded payload from interceptor
                             d("Okta", "tok",
-                              "Expenses access token — actual decoded claims",
-                              {"type": "jwt_claims",
-                               "token": "Expenses Access Token (real)",
-                               **{k: v for k, v in xaa_debug.items()}})
+                              "Expenses access token — actual decoded payload",
+                              {"type":   "jwt_raw",
+                               "token":  "Expenses Access Token  ✓ real decoded payload",
+                               "claims": xaa_debug})
                             # Update the tool result text with debug stripped
                             rc["text"] = json.dumps(data)
                     except Exception:
