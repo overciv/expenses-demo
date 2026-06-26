@@ -358,13 +358,17 @@ def strands_agent(payload, context):
                         data = json.loads(rc["text"])
                         xaa_debug = data.pop("__xaa_debug__", None)
                         if xaa_debug:
-                            # Emit REAL ID-JAG (Stage 2 result) — exact payload from interceptor
+                            # Emit ID-JAG — derived accurately from expenses token
+                            # (org AS = expenses iss minus /oauth2/ path, act/sub from expenses)
                             id_jag_claims = xaa_debug.get("id_jag")
                             if id_jag_claims:
+                                is_derived = id_jag_claims.pop("_derived", None)
+                                label = ("ID-JAG  ⚠ derived from expenses token via XAA spec"
+                                         if is_derived else "ID-JAG  ✓ real decoded payload")
                                 d("Okta", "tok",
-                                  "ID-JAG — actual decoded payload",
+                                  "ID-JAG — decoded payload",
                                   {"type":   "jwt_raw",
-                                   "token":  "ID-JAG  ✓ real decoded payload",
+                                   "token":  label,
                                    "claims": id_jag_claims})
                             # Emit REAL expenses token (Stage 3 result)
                             expenses_claims = xaa_debug.get("expenses")

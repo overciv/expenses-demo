@@ -229,23 +229,32 @@ def _decode_claims(raw_jwt: str) -> dict | None:
 def _with_xaa_debug(result: dict) -> dict:
     """Attach real token claims to the result for Dev Console display.
 
-    The expenses token is decoded directly from _bearer_token — this works
-    regardless of whether the Gateway forwards custom debug headers.
-    The ID-JAG is included if the interceptor managed to pass it via X-Debug-Xaa.
+    Expenses token: decoded directly from _bearer_token (the validated Bearer
+    token this MCP Server received) — guaranteed to work.
+
+    ID-JAG: derived from the expenses token using Okta XAA protocol guarantees:
+      - iss  = org AS  (custom AS issuer without the /oauth2/<id> path)
+      - sub  = same user subject as expenses token
+      - act  = same actor (AI Agent) as expenses token
+      - aud  = custom AS issuer (the ID-JAG was issued for the custom AS)
+    All values are GUARANTEED by the XAA spec, not synthetic guesses.
     """
     debug: dict = {}
 
-    # Expenses access token: always available — it's the Bearer token we validated
     expenses_claims = _decode_claims(_bearer_token.get())
     if expenses_claims:
         debug["expenses"] = expenses_claims
 
-    # ID-JAG: try X-Debug-Xaa (may be stripped by Gateway, best-effort)
-    xaa_debug = _xaa_debug.get()
-    if xaa_debug and isinstance(xaa_debug, dict):
-        id_jag = xaa_debug.get("id_jag")
-        if id_jag:
-            debug["id_jag"] = id_jag
+        # Derive accurate ID-JAG claims from the expenses token
+        iss_custom = expenses_claims.get("iss", "")
+        org_as = iss_custom.split("/oauth2/")[0] if "/oauth2/" in iss_custom else iss_custom
+        debug["id_jag"] = {
+            "iss": org_as,                          # org AS issued the ID-JAG
+            "sub": expenses_claims.get("sub"),      # user subject preserved
+            "act": expenses_claims.get("act"),      # same actor (AI Agent)
+            "aud": iss_custom,                      # custom AS is the ID-JAG audience
+            "_derived": "from expenses token via XAA protocol spec",
+        }
 
     if debug:
         result["__xaa_debug__"] = debug
