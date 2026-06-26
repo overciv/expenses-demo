@@ -217,12 +217,38 @@ def _check(r: httpx.Response, required_scope: str = "") -> None:
 # Tools
 # ─────────────────────────────────────────────────────────────
 
+def _decode_claims(raw_jwt: str) -> dict | None:
+    try:
+        payload = raw_jwt.split(".")[1]
+        payload += "=" * (4 - len(payload) % 4)
+        return json.loads(base64.urlsafe_b64decode(payload))
+    except Exception:
+        return None
+
+
 def _with_xaa_debug(result: dict) -> dict:
-    """Attach real XAA token claims to the result so the agent can show them
-    in the Dev Console.  The agent strips __xaa_debug__ before displaying."""
-    claims = _xaa_debug.get()
-    if claims:
-        result["__xaa_debug__"] = claims
+    """Attach real token claims to the result for Dev Console display.
+
+    The expenses token is decoded directly from _bearer_token — this works
+    regardless of whether the Gateway forwards custom debug headers.
+    The ID-JAG is included if the interceptor managed to pass it via X-Debug-Xaa.
+    """
+    debug: dict = {}
+
+    # Expenses access token: always available — it's the Bearer token we validated
+    expenses_claims = _decode_claims(_bearer_token.get())
+    if expenses_claims:
+        debug["expenses"] = expenses_claims
+
+    # ID-JAG: try X-Debug-Xaa (may be stripped by Gateway, best-effort)
+    xaa_debug = _xaa_debug.get()
+    if xaa_debug and isinstance(xaa_debug, dict):
+        id_jag = xaa_debug.get("id_jag")
+        if id_jag:
+            debug["id_jag"] = id_jag
+
+    if debug:
+        result["__xaa_debug__"] = debug
     return result
 
 
