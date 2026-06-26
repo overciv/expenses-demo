@@ -253,6 +253,7 @@ def _with_xaa_debug(result: dict) -> dict:
             "sub": expenses_claims.get("sub"),      # user subject preserved
             "act": expenses_claims.get("act"),      # same actor (AI Agent)
             "aud": iss_custom,                      # custom AS is the ID-JAG audience
+            "scp": expenses_claims.get("scp"),      # scopes carried through Stage 2
             "_derived": "from expenses token via XAA protocol spec",
         }
 
