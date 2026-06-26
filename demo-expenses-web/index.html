@@ -1533,6 +1533,8 @@ let _consoleVerbose = false;   // false = Demo mode (key lines only)
 function _isImportant(source, level, msg) {
   if (level === 'err') return true;
   if (source === 'Okta' && level === 'ok') return true;              // token exchange results
+  if (source === 'Okta' && level === 'tok') return true;             // real decoded JWT payloads
+  if (source === 'Browser' && level === 'tok') return true;          // org ID token claims
   if (source === 'Okta' && level === 'req' &&
       (msg.includes('Stage 2') || msg.includes('Stage 3'))) return true;
   if (source === 'Interceptor' && level === 'ok') return true;       // token injected

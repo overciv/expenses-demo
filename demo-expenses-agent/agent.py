@@ -147,48 +147,21 @@ def _xaa_chain(debug: list, step_label: str, t0: float,
                 "claims": id_token_claims,
             }
 
+        # Show the org ID token being sent into Stage 2 (real, we have it)
         d("Okta", "req",
           "Stage 2: org ID token → ID-JAG  (org AS, token-exchange grant, pkjwt client_assertion)",
           org_token_data)
 
-        # ID-JAG: derived — interceptor holds actual token; reconstruct known claims
-        id_jag_data: dict | None = None
-        if id_token_claims:
-            id_jag_data = {
-                "type":   "jwt_raw",
-                "token":  "ID-JAG  ⚠ derived — interceptor holds actual token",
-                "claims": {
-                    "iss": id_token_claims.get("iss"),
-                    "sub": id_token_claims.get("sub"),
-                    "act": {"sub": AGENT_ID},
-                },
-            }
-
+        # ID-JAG and expenses token: real decoded payloads emitted after the tool
+        # call via the __xaa_debug__ pipeline — no synthetic data shown here
         d("Okta", "ok",
-          "ID-JAG obtained (act.sub: AI Agent, iss: org AS, expires_in: 300s)",
-          id_jag_data)
+          "ID-JAG obtained  ↳ real decoded payload appears below after tool execution")
 
         d("Okta", "req",
           "Stage 3: ID-JAG → expenses access token  (custom AS, jwt-bearer grant, pkjwt)")
 
-        # Expenses token: derived preview only — actual decoded claims arrive below
-        # after the tool call via the __xaa_debug__ pipeline (real values from interceptor)
-        expenses_token_data: dict | None = None
-        if id_token_claims:
-            expenses_token_data = {
-                "type":   "jwt_raw",
-                "token":  "Expenses Access Token  ⚠ derived — see actual token below",
-                "claims": {
-                    "sub": id_token_claims.get("sub"),
-                    "act": {"sub": AGENT_ID},
-                    "scp": ["expenses:read", "expenses:write", "expenses:delete"],
-                    "aud": "api://expenses",
-                },
-            }
-
         d("Okta", "ok",
-          "Expenses access token obtained (scp: expenses:read expenses:write expenses:delete)",
-          expenses_token_data)
+          "Expenses access token obtained  ↳ real decoded payload appears below after tool execution")
 
         d("Interceptor", "ok",
           "Authorization: Bearer <expenses-token> injected → forwarding to MCP Server")
